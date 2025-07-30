@@ -21,20 +21,23 @@ def load_symbols_from_file(uploaded_file):
 def load_index_symbols(index):
     try:
         if index == "NASDAQ":
-            url = 'https://old.nasdaq.com/screening/companies-by-industry.aspx?exchange=NASDAQ&render=download'
-            df = pd.read_csv(url)
+            url = 'https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt'
+            response = requests.get(url)
+            lines = response.text.splitlines()
+            data = [line.split('|') for line in lines[1:-1]]  # Skip header and footer
+            df = pd.DataFrame(data, columns=lines[0].split('|'))
+            return df['Symbol'].dropna().unique().tolist()
         elif index == "S&P500":
             url = 'https://datahub.io/core/s-and-p-500-companies/r/constituents.csv'
             df = pd.read_csv(url)
+            symbol_col = next((col for col in df.columns if col.strip().lower() == "symbol"), None)
+            if not symbol_col:
+                return []
+            return df[symbol_col].dropna().unique().tolist()
         else:
             return []
-
-        symbol_col = next((col for col in df.columns if col.strip().lower() == "symbol"), None)
-        if not symbol_col:
-            return []
-
-        return df[symbol_col].dropna().unique().tolist()
-    except:
+    except Exception as e:
+        st.error(f"Failed to load symbols for {index}: {e}")
         return []
 
 def fetch_latest_news(symbol):
