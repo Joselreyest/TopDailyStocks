@@ -19,15 +19,23 @@ def load_symbols_from_file(uploaded_file):
     return df[symbol_col].dropna().unique().tolist()
 
 def load_index_symbols(index):
-    if index == "NASDAQ":
-        url = 'https://old.nasdaq.com/screening/companies-by-industry.aspx?exchange=NASDAQ&render=download'
-    elif index == "S&P500":
-        url = 'https://datahub.io/core/s-and-p-500-companies/r/constituents.csv'
-    else:
-        return []
+    try:
+        if index == "NASDAQ":
+            url = 'https://old.nasdaq.com/screening/companies-by-industry.aspx?exchange=NASDAQ&render=download'
+            df = pd.read_csv(url)
+        elif index == "S&P500":
+            url = 'https://datahub.io/core/s-and-p-500-companies/r/constituents.csv'
+            df = pd.read_csv(url)
+        else:
+            return []
 
-    df = pd.read_csv(url)
-    return df['Symbol'].dropna().unique().tolist()
+        symbol_col = next((col for col in df.columns if col.strip().lower() == "symbol"), None)
+        if not symbol_col:
+            return []
+
+        return df[symbol_col].dropna().unique().tolist()
+    except:
+        return []
 
 def fetch_latest_news(symbol):
     try:
@@ -46,7 +54,7 @@ def fetch_stock_data(symbols):
     data = []
     total = len(symbols)
     progress_text = st.empty()
-    progress_bar = st.progress(0)
+    progress_bar = st.progress(0.0)
 
     for i, symbol in enumerate(symbols):
         try:
@@ -95,7 +103,7 @@ def fetch_stock_data(symbols):
         except:
             continue
 
-        progress = (i + 1) / total
+        progress = float(i + 1) / float(total)
         progress_bar.progress(progress)
         progress_text.text(f"Scanning {symbol} ({i+1}/{total})...")
         time.sleep(0.1)
@@ -127,15 +135,14 @@ with st.sidebar:
     price_change_filter = st.number_input("Min % Price Increase Today", min_value=0.0, max_value=100.0, value=10.0)
     rel_vol_filter = st.number_input("Min Relative Volume (x Avg)", min_value=0.0, max_value=20.0, value=5.0)
 
-if st.button("🔍 Run Scanner"):
-    if not symbols:
-        st.warning("No symbols loaded. Please upload a valid file or select an index.")
-    else:
-        with st.spinner("Scanning market..."):
-            df = fetch_stock_data(symbols)
-            if not df.empty:
-                df = df.sort_values(by='% Change', ascending=False).head(top_n)
-                st.success(f"Found {len(df)} stocks matching criteria")
-                st.dataframe(df)
-            else:
-                st.warning("No stocks matched the criteria.")
+scanner_ready = symbols is not None and len(symbols) > 0
+
+if st.button("🔍 Run Scanner", disabled=not scanner_ready):
+    with st.spinner("Scanning market..."):
+        df = fetch_stock_data(symbols)
+        if not df.empty:
+            df = df.sort_values(by='% Change', ascending=False).head(top_n)
+            st.success(f"Found {len(df)} stocks matching criteria")
+            st.dataframe(df)
+        else:
+            st.warning("No stocks matched the criteria.")
