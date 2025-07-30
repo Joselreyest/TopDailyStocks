@@ -76,14 +76,18 @@ def fetch_stock_data(symbols):
     total = len(symbols)
     progress_text = st.empty()
     progress_bar = st.progress(0.0)
+    debug_output = st.empty()
+    debug_log = []
 
     for i, symbol in enumerate(symbols):
+        reason_skipped = []
         try:
             stock = yf.Ticker(symbol)
             hist = stock.history(period="2d")
             info = stock.info
 
             if len(hist) < 2:
+                reason_skipped.append("Not enough historical data")
                 continue
 
             price_today = hist['Close'].iloc[-1]
@@ -94,14 +98,19 @@ def fetch_stock_data(symbols):
             avg_volume = info.get('averageVolume', 0)
             rel_volume = volume_today / avg_volume if avg_volume else 0
 
-            if percent_change < price_change_filter or rel_volume < rel_vol_filter:
-                continue
-
+            if percent_change < price_change_filter:
+                reason_skipped.append(f"% Change {percent_change:.2f} < {price_change_filter}")
+            if rel_volume < rel_vol_filter:
+                reason_skipped.append(f"Rel Vol {rel_volume:.2f} < {rel_vol_filter}")
             if not (price_min <= price_today <= price_max):
-                continue
+                reason_skipped.append(f"Price {price_today:.2f} not in range {price_min}-{price_max}")
 
             float_shares = info.get('floatShares') or 0
             if float_shares > max_float:
+                reason_skipped.append(f"Float {float_shares} > {max_float}")
+
+            if reason_skipped:
+                debug_log.append(f"{symbol}: SKIPPED => " + ", ".join(reason_skipped))
                 continue
 
             headlines = fetch_latest_news(symbol)
@@ -121,15 +130,17 @@ def fetch_stock_data(symbols):
                 'Pre-Market Price': info.get('preMarketPrice'),
                 'Recent News': headlines
             })
-        except:
+        except Exception as e:
+            debug_log.append(f"{symbol}: ERROR => {e}")
             continue
 
         progress = float(i + 1) / float(total)
         progress_bar.progress(progress)
         progress_text.text(f"Scanning {symbol} ({i+1}/{total})...")
-        time.sleep(0.1)
+        time.sleep(0.05)
 
     progress_text.text("Scan complete.")
+    debug_output.text("\n".join(debug_log[-10:]))  # show last 10 log entries
     return pd.DataFrame(data)
 
 # ------------------------------
