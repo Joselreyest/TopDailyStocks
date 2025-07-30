@@ -11,7 +11,11 @@ from bs4 import BeautifulSoup
 # ------------------------------
 def load_symbols_from_file(uploaded_file):
     df = pd.read_csv(uploaded_file)
-    return df['Symbol'].dropna().unique().tolist()
+    symbol_col = next((col for col in df.columns if col.strip().lower() == "symbol"), None)
+    if not symbol_col:
+        st.error("Uploaded file must contain a 'Symbol' column (case-insensitive).")
+        return []
+    return df[symbol_col].dropna().unique().tolist()
 
 def load_index_symbols(index):
     if index == "NASDAQ":
