@@ -5,6 +5,7 @@ import datetime
 import requests
 import io
 from bs4 import BeautifulSoup
+import time
 
 # ------------------------------
 # Helper functions
@@ -43,8 +44,10 @@ def fetch_latest_news(symbol):
 
 def fetch_stock_data(symbols):
     data = []
-    progress = st.progress(0)
     total = len(symbols)
+    progress_text = st.empty()
+    progress_bar = st.progress(0)
+
     for i, symbol in enumerate(symbols):
         try:
             stock = yf.Ticker(symbol)
@@ -91,8 +94,13 @@ def fetch_stock_data(symbols):
             })
         except:
             continue
-        progress.progress((i + 1) / total)
 
+        progress = (i + 1) / total
+        progress_bar.progress(progress)
+        progress_text.text(f"Scanning {symbol} ({i+1}/{total})...")
+        time.sleep(0.1)
+
+    progress_text.text("Scan complete.")
     return pd.DataFrame(data)
 
 # ------------------------------
