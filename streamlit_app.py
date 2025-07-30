@@ -34,6 +34,24 @@ def load_index_symbols(index):
             if not symbol_col:
                 return []
             return df[symbol_col].dropna().unique().tolist()
+        elif index == "NYSE":
+            url = 'https://www.nyse.com/api/quotes/filter'
+            headers = {
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0'
+            }
+            payload = {
+                "instrumentType": "EQUITY",
+                "pageNumber": 1,
+                "sortColumn": "NORMALIZED_TICKER",
+                "sortOrder": "ASC",
+                "maxResultsPerPage": 1000,
+                "filterToken": ""
+            }
+            response = requests.post(url, headers=headers, json=payload)
+            data = response.json()
+            symbols = [item['symbolTicker'] for item in data if 'symbolTicker' in item]
+            return symbols
         else:
             return []
     except Exception as e:
@@ -121,7 +139,7 @@ st.title("📈 Market Demand & Supply Stock Scanner")
 
 with st.sidebar:
     st.header("🔧 Scanner Settings")
-    source = st.radio("Select Symbol Source", ["NASDAQ", "S&P500", "Upload File"])
+    source = st.radio("Select Symbol Source", ["NASDAQ", "S&P500", "NYSE", "Upload File"])
 
     symbols = []
     if source == "Upload File":
