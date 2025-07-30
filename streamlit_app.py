@@ -43,7 +43,9 @@ def fetch_latest_news(symbol):
 
 def fetch_stock_data(symbols):
     data = []
-    for symbol in symbols:
+    progress = st.progress(0)
+    total = len(symbols)
+    for i, symbol in enumerate(symbols):
         try:
             stock = yf.Ticker(symbol)
             hist = stock.history(period="2d")
@@ -89,6 +91,7 @@ def fetch_stock_data(symbols):
             })
         except:
             continue
+        progress.progress((i + 1) / total)
 
     return pd.DataFrame(data)
 
@@ -97,29 +100,34 @@ def fetch_stock_data(symbols):
 # ------------------------------
 st.title("📈 Market Demand & Supply Stock Scanner")
 
-source = st.radio("Select Symbol Source", ["NASDAQ", "S&P500", "Upload File"])
+with st.sidebar:
+    st.header("🔧 Scanner Settings")
+    source = st.radio("Select Symbol Source", ["NASDAQ", "S&P500", "Upload File"])
 
-symbols = []
-if source == "Upload File":
-    uploaded_file = st.file_uploader("Upload CSV with 'Symbol' column")
-    if uploaded_file:
-        symbols = load_symbols_from_file(uploaded_file)
-else:
-    symbols = load_index_symbols(source)
+    symbols = []
+    if source == "Upload File":
+        uploaded_file = st.file_uploader("Upload CSV with 'Symbol' column")
+        if uploaded_file:
+            symbols = load_symbols_from_file(uploaded_file)
+    else:
+        symbols = load_index_symbols(source)
 
-price_min, price_max = st.slider("Price Range ($)", 0.01, 100.0, (2.0, 20.0))
-max_float = st.slider("Max Float (shares)", 200_000, 10_000_000, 10_000_000)
-top_n = st.slider("Top N Stocks to Show", 1, 20, 10)
+    price_min, price_max = st.slider("Price Range ($)", 0.01, 100.0, (2.0, 20.0))
+    max_float = st.slider("Max Float (shares)", 200_000, 10_000_000, 10_000_000)
+    top_n = st.slider("Top N Stocks to Show", 1, 20, 10)
 
-price_change_filter = st.number_input("Min % Price Increase Today", min_value=0.0, max_value=100.0, value=10.0)
-rel_vol_filter = st.number_input("Min Relative Volume (x Avg)", min_value=0.0, max_value=20.0, value=5.0)
+    price_change_filter = st.number_input("Min % Price Increase Today", min_value=0.0, max_value=100.0, value=10.0)
+    rel_vol_filter = st.number_input("Min Relative Volume (x Avg)", min_value=0.0, max_value=20.0, value=5.0)
 
 if st.button("🔍 Run Scanner"):
-    with st.spinner("Scanning market..."):
-        df = fetch_stock_data(symbols)
-        if not df.empty:
-            df = df.sort_values(by='% Change', ascending=False).head(top_n)
-            st.success(f"Found {len(df)} stocks matching criteria")
-            st.dataframe(df)
-        else:
-            st.warning("No stocks matched the criteria.")
+    if not symbols:
+        st.warning("No symbols loaded. Please upload a valid file or select an index.")
+    else:
+        with st.spinner("Scanning market..."):
+            df = fetch_stock_data(symbols)
+            if not df.empty:
+                df = df.sort_values(by='% Change', ascending=False).head(top_n)
+                st.success(f"Found {len(df)} stocks matching criteria")
+                st.dataframe(df)
+            else:
+                st.warning("No stocks matched the criteria.")
