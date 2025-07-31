@@ -18,23 +18,19 @@ def load_symbols_from_file(uploaded_file):
         return []
     return df[symbol_col].dropna().unique().tolist()
 
-def get_nyse_amex_symbols():
+def get_exchange_symbols(exchange):
     try:
-        url = 'https://www.advfn.com/nyse/newyorkstockexchange.asp'
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        tables = soup.find_all("table", class_="market")
-        symbols = set()
-        for table in tables:
-            rows = table.find_all("tr")
-            for row in rows[1:]:
-                cols = row.find_all("td")
-                if cols:
-                    symbols.add(cols[0].text.strip())
-        return list(symbols)
+        url_map = {
+            "NYSE": "https://old.nasdaq.com/screening/companies-by-name.aspx?letter=0&exchange=nyse&render=download",
+            "AMEX": "https://old.nasdaq.com/screening/companies-by-name.aspx?letter=0&exchange=amex&render=download"
+        }
+        url = url_map.get(exchange)
+        if not url:
+            raise ValueError("Unsupported exchange")
+        df = pd.read_csv(url)
+        return df['Symbol'].dropna().unique().tolist()
     except Exception as e:
-        st.error(f"Failed to load NYSE/AMEX symbols: {e}")
+        st.error(f"Failed to load {exchange} symbols: {e}")
         return []
 
 def load_index_symbols(index):
@@ -51,7 +47,7 @@ def load_index_symbols(index):
                 return []
             return df[symbol_col].dropna().unique().tolist()
         elif index in ["NYSE", "AMEX"]:
-            return get_nyse_amex_symbols()
+            return get_exchange_symbols(index)
         else:
             return []
     except Exception as e:
@@ -161,14 +157,6 @@ with st.sidebar:
     st.header("🔧 Scanner Settings")
     source = st.radio("Select Symbol Source", ["NASDAQ", "S&P500", "NYSE", "AMEX", "Upload File"])
 
-    symbols = []
-    if source == "Upload File":
-        uploaded_file = st.file_uploader("Upload CSV with 'Symbol' column")
-        if uploaded_file:
-            symbols = load_symbols_from_file(uploaded_file)
-    else:
-        symbols = load_index_symbols(source)
-
     price_min, price_max = st.slider("Price Range ($)", 0.01, 100.0, (2.0, 20.0))
     max_float = st.slider("Max Float (shares)", 200_000, 10_000_000, 10_000_000)
     top_n = st.slider("Top N Stocks to Show", 1, 20, 10)
@@ -177,14 +165,28 @@ with st.sidebar:
     rel_vol_filter = st.number_input("Min Relative Volume (x Avg)", min_value=0.0, max_value=20.0, value=5.0)
     debug_mode = st.checkbox("Enable Debug Log")
 
-scanner_ready = symbols is not None and len(symbols) > 0
+scanner_ready = True
+symbols = []
 
-if st.button("🔍 Run Scanner", disabled=not scanner_ready):
-    with st.spinner("Scanning market..."):
-        df = fetch_stock_data(symbols)
-        if not df.empty:
-            df = df.sort_values(by='% Change', ascending=False).head(top_n)
-            st.success(f"Found {len(df)} stocks matching criteria")
-            st.dataframe(df)
+if st.button("🔍 Run Scanner"):
+    with st.spinner("Preparing symbol list..."):
+        if source == "Upload File":
+            uploaded_file = st.file_uploader("Upload CSV with 'Symbol' column")
+            if uploaded_file:
+                symbols = load_symbols_from_file(uploaded_file)
+            else:
+                st.warning("Please upload a file.")
         else:
-            st.warning("No stocks matched the criteria.")
+            symbols = load_index_symbols(source)
+
+    if symbols:
+        with st.spinner("Scanning market..."):
+            df = fetch_stock_data(symbols)
+            if not df.empty:
+                df = df.sort_values(by='% Change', ascending=False).head(top_n)
+                st.success(f"Found {len(df)} stocks matching criteria")
+                st.dataframe(df)
+            else:
+                st.warning("No stocks matched the criteria.")
+    else:
+        st.warning("No symbols loaded. Please check the selected source or uploaded file.")
