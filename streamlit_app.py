@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 import os
 from threading import Lock
+from stqdm import stqdm
 
 # ------------------------------
 # Configuration
@@ -196,28 +197,15 @@ def app():
         results = []
         skipped = {}
 
-        progress = st.empty()
-        progress_bar = st.progress(0)
-        total = len(symbol_list)
-        counter = {"count": 0}
-        lock = Lock()
-
         def worker(symbol):
             result, reasons = process_symbol(symbol)
             if result:
                 results.append(result)
             elif reasons:
                 skipped[symbol] = reasons
-            with lock:
-                counter["count"] += 1
-                progress_bar.progress(counter["count"] / total)
 
         with ThreadPoolExecutor(max_workers=20) as executor:
-            futures = [executor.submit(worker, symbol) for symbol in symbol_list]
-            for f in futures:
-                f.result()
-
-        progress_bar.empty()
+            list(stqdm(executor.map(worker, symbol_list), total=len(symbol_list)))
 
         if results:
             df = pd.DataFrame(results)
