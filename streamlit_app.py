@@ -6,23 +6,18 @@ import requests
 import io
 from bs4 import BeautifulSoup
 import time
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 
 # ------------------------------
 # Configuration
 # ------------------------------
-EOD_API_KEY = "688b9f9c017ae7.26013057"  # Replace with your actual API key
+EOD_API_KEY = "your_eod_api_key_here"  # Replace with your actual API key
 
 # ------------------------------
 # Helper functions
 # ------------------------------
-def load_symbols_from_file(uploaded_file):
-    df = pd.read_csv(uploaded_file)
-    symbol_col = next((col for col in df.columns if col.strip().lower() == "symbol"), None)
-    if not symbol_col:
-        st.error("Uploaded file must contain a 'Symbol' column (case-insensitive).")
-        return []
-    return df[symbol_col].dropna().unique().tolist()
-
+@lru_cache(maxsize=5)
 def get_exchange_symbols(exchange):
     try:
         exchange_map = {
@@ -46,12 +41,11 @@ def get_exchange_symbols(exchange):
         st.error(f"Failed to load {exchange} symbols: {e}")
         return []
 
+@lru_cache(maxsize=5)
 def load_index_symbols(index):
     try:
         if index == "NASDAQ":
-            url = 'https://datahub.io/core/nasdaq-listings/r/nasdaq-listed-symbols.csv'
-            df = pd.read_csv(url)
-            return df['Symbol'].dropna().unique().tolist()
+            return get_exchange_symbols("NASDAQ")
         elif index == "S&P500":
             url = 'https://datahub.io/core/s-and-p-500-companies/r/constituents.csv'
             df = pd.read_csv(url)
@@ -80,79 +74,84 @@ def fetch_latest_news(symbol):
     except:
         return ""
 
+def process_symbol(symbol):
+    reason_skipped = []
+    try:
+        stock = yf.Ticker(symbol)
+        hist = stock.history(period="2d")
+        info = stock.info
+
+        if len(hist) < 2:
+            reason_skipped.append("Not enough historical data")
+            return None, reason_skipped
+
+        price_today = hist['Close'].iloc[-1]
+        price_yesterday = hist['Close'].iloc[-2]
+        percent_change = ((price_today - price_yesterday) / price_yesterday) * 100
+
+        volume_today = hist['Volume'].iloc[-1]
+        avg_volume = info.get('averageVolume', 0)
+        rel_volume = volume_today / avg_volume if avg_volume else 0
+
+        if percent_change < price_change_filter:
+            reason_skipped.append(f"% Change {percent_change:.2f} < {price_change_filter}")
+        if rel_volume < rel_vol_filter:
+            reason_skipped.append(f"Rel Vol {rel_volume:.2f} < {rel_vol_filter}")
+        if not (price_min <= price_today <= price_max):
+            reason_skipped.append(f"Price {price_today:.2f} not in range {price_min}-{price_max}")
+
+        float_shares = info.get('floatShares') or 0
+        if float_shares > max_float:
+            reason_skipped.append(f"Float {float_shares} > {max_float}")
+
+        if reason_skipped:
+            return None, reason_skipped
+
+        headlines = fetch_latest_news(symbol)
+
+        return {
+            'Symbol': symbol,
+            'Name': info.get('shortName'),
+            'Price': round(price_today, 2),
+            '% Change': round(percent_change, 2),
+            'Volume': volume_today,
+            'Float': float_shares,
+            'Market Cap': info.get('marketCap'),
+            'P/E': info.get('trailingPE'),
+            'Sector': info.get('sector'),
+            'Analyst Rating': info.get('recommendationKey'),
+            'Volatility': info.get('beta'),
+            'Pre-Market Price': info.get('preMarketPrice'),
+            'Recent News': headlines
+        }, None
+
+    except Exception as e:
+        return None, [str(e)]
+
 def fetch_stock_data(symbols):
     data = []
+    debug_log = []
     total = len(symbols)
     progress_text = st.empty()
     progress_bar = st.progress(0.0)
-    debug_output = st.empty()
-    debug_log = []
 
-    for i, symbol in enumerate(symbols):
-        reason_skipped = []
-        try:
-            stock = yf.Ticker(symbol)
-            hist = stock.history(period="2d")
-            info = stock.info
-
-            if len(hist) < 2:
-                reason_skipped.append("Not enough historical data")
-                continue
-
-            price_today = hist['Close'].iloc[-1]
-            price_yesterday = hist['Close'].iloc[-2]
-            percent_change = ((price_today - price_yesterday) / price_yesterday) * 100
-
-            volume_today = hist['Volume'].iloc[-1]
-            avg_volume = info.get('averageVolume', 0)
-            rel_volume = volume_today / avg_volume if avg_volume else 0
-
-            if percent_change < price_change_filter:
-                reason_skipped.append(f"% Change {percent_change:.2f} < {price_change_filter}")
-            if rel_volume < rel_vol_filter:
-                reason_skipped.append(f"Rel Vol {rel_volume:.2f} < {rel_vol_filter}")
-            if not (price_min <= price_today <= price_max):
-                reason_skipped.append(f"Price {price_today:.2f} not in range {price_min}-{price_max}")
-
-            float_shares = info.get('floatShares') or 0
-            if float_shares > max_float:
-                reason_skipped.append(f"Float {float_shares} > {max_float}")
-
-            if reason_skipped:
-                if debug_mode:
-                    debug_log.append(f"{symbol}: SKIPPED => " + ", ".join(reason_skipped))
-                continue
-
-            headlines = fetch_latest_news(symbol)
-
-            data.append({
-                'Symbol': symbol,
-                'Name': info.get('shortName'),
-                'Price': round(price_today, 2),
-                '% Change': round(percent_change, 2),
-                'Volume': volume_today,
-                'Float': float_shares,
-                'Market Cap': info.get('marketCap'),
-                'P/E': info.get('trailingPE'),
-                'Sector': info.get('sector'),
-                'Analyst Rating': info.get('recommendationKey'),
-                'Volatility': info.get('beta'),
-                'Pre-Market Price': info.get('preMarketPrice'),
-                'Recent News': headlines
-            })
-        except Exception as e:
-            if debug_mode:
-                debug_log.append(f"{symbol}: ERROR => {e}")
-            continue
-
+    def update_progress(i):
         progress = float(i + 1) / float(total)
         progress_bar.progress(progress)
-        progress_text.text(f"Scanning {symbol} ({i+1}/{total})...")
-        time.sleep(0.05)
+        progress_text.text(f"Scanning ({i+1}/{total})...")
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(process_symbol, symbol): symbol for symbol in symbols}
+        for i, future in enumerate(futures):
+            result, reason_skipped = future.result()
+            if result:
+                data.append(result)
+            elif debug_mode:
+                debug_log.append(f"{futures[future]}: SKIPPED => {', '.join(reason_skipped)}")
+            update_progress(i)
 
     progress_text.text("Scan complete.")
-    if debug_mode:
-        debug_output.text("\n".join(debug_log[-10:]))
+    if debug_mode and debug_log:
         with open("skipped_symbols_log.txt", "w") as f:
             for log in debug_log:
                 f.write(log + "\n")
@@ -178,9 +177,6 @@ with st.sidebar:
     rel_vol_filter = st.number_input("Min Relative Volume (x Avg)", min_value=0.0, max_value=20.0, value=5.0)
     debug_mode = st.checkbox("Enable Debug Log")
 
-scanner_ready = True
-symbols = []
-
 if st.button("🔍 Run Scanner"):
     with st.spinner("Preparing symbol list..."):
         if source == "Upload File":
@@ -189,6 +185,7 @@ if st.button("🔍 Run Scanner"):
                 symbols = load_symbols_from_file(uploaded_file)
             else:
                 st.warning("Please upload a file.")
+                symbols = []
         else:
             symbols = load_index_symbols(source)
 
