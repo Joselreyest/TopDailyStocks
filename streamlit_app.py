@@ -6,7 +6,6 @@ import requests
 import io
 from bs4 import BeautifulSoup
 import time
-import StringIO
 
 # ------------------------------
 # Helper functions
