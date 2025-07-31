@@ -215,6 +215,12 @@ def app():
 
         if results:
             df = pd.DataFrame(results)
+            # Format Volume and Float with commas
+            if 'Volume' in df.columns:
+                df['Volume'] = df['Volume'].apply(lambda x: f"{x:,}")
+            if 'Float' in df.columns:
+                df['Float'] = df['Float'].apply(lambda x: f"{x:,}")
+       
             st.success(f"Found {len(df)} matching stocks")
             st.dataframe(df)
 
