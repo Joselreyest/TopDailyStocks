@@ -35,23 +35,9 @@ def load_index_symbols(index):
                 return []
             return df[symbol_col].dropna().unique().tolist()
         elif index == "NYSE":
-            url = 'https://www.nyse.com/api/quotes/filter'
-            headers = {
-                'Content-Type': 'application/json',
-                'User-Agent': 'Mozilla/5.0'
-            }
-            payload = {
-                "instrumentType": "EQUITY",
-                "pageNumber": 1,
-                "sortColumn": "NORMALIZED_TICKER",
-                "sortOrder": "ASC",
-                "maxResultsPerPage": 1000,
-                "filterToken": ""
-            }
-            response = requests.post(url, headers=headers, json=payload)
-            data = response.json()
-            symbols = [item['symbolTicker'] for item in data if 'symbolTicker' in item]
-            return symbols
+            url = 'https://old.nasdaq.com/screening/companies-by-industry.aspx?exchange=NYSE&render=download'
+            df = pd.read_csv(url)
+            return df['Symbol'].dropna().unique().tolist()
         else:
             return []
     except Exception as e:
@@ -110,7 +96,8 @@ def fetch_stock_data(symbols):
                 reason_skipped.append(f"Float {float_shares} > {max_float}")
 
             if reason_skipped:
-                debug_log.append(f"{symbol}: SKIPPED => " + ", ".join(reason_skipped))
+                if debug_mode:
+                    debug_log.append(f"{symbol}: SKIPPED => " + ", ".join(reason_skipped))
                 continue
 
             headlines = fetch_latest_news(symbol)
@@ -131,7 +118,8 @@ def fetch_stock_data(symbols):
                 'Recent News': headlines
             })
         except Exception as e:
-            debug_log.append(f"{symbol}: ERROR => {e}")
+            if debug_mode:
+                debug_log.append(f"{symbol}: ERROR => {e}")
             continue
 
         progress = float(i + 1) / float(total)
@@ -140,7 +128,8 @@ def fetch_stock_data(symbols):
         time.sleep(0.05)
 
     progress_text.text("Scan complete.")
-    debug_output.text("\n".join(debug_log[-10:]))  # show last 10 log entries
+    if debug_mode:
+        debug_output.text("\n".join(debug_log[-10:]))
     return pd.DataFrame(data)
 
 # ------------------------------
@@ -166,7 +155,8 @@ with st.sidebar:
 
     price_change_filter = st.number_input("Min % Price Increase Today", min_value=0.0, max_value=100.0, value=10.0)
     rel_vol_filter = st.number_input("Min Relative Volume (x Avg)", min_value=0.0, max_value=20.0, value=5.0)
-
+    debug_mode = st.checkbox("Enable Debug Log")
+    
 scanner_ready = symbols is not None and len(symbols) > 0
 
 if st.button("🔍 Run Scanner", disabled=not scanner_ready):
