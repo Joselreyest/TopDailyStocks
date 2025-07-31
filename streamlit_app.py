@@ -9,6 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 import os
+from threading import Lock
 
 # ------------------------------
 # Configuration
