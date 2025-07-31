@@ -12,7 +12,7 @@ from functools import lru_cache
 # ------------------------------
 # Configuration
 # ------------------------------
-EOD_API_KEY = "your_eod_api_key_here"  # Replace with your actual API key
+EOD_API_KEY = "688b9f9c017ae7.26013057"  # Replace with your actual API key
 
 # ------------------------------
 # Helper functions
