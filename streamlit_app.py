@@ -18,14 +18,30 @@ def load_symbols_from_file(uploaded_file):
         return []
     return df[symbol_col].dropna().unique().tolist()
 
+def get_nyse_amex_symbols():
+    try:
+        url = 'https://www.advfn.com/nyse/newyorkstockexchange.asp'
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        tables = soup.find_all("table", class_="market")
+        symbols = set()
+        for table in tables:
+            rows = table.find_all("tr")
+            for row in rows[1:]:
+                cols = row.find_all("td")
+                if cols:
+                    symbols.add(cols[0].text.strip())
+        return list(symbols)
+    except Exception as e:
+        st.error(f"Failed to load NYSE/AMEX symbols: {e}")
+        return []
+        
 def load_index_symbols(index):
     try:
         if index == "NASDAQ":
-            url = 'https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt'
-            response = requests.get(url)
-            lines = response.text.splitlines()
-            data = [line.split('|') for line in lines[1:-1]]  # Skip header and footer
-            df = pd.DataFrame(data, columns=lines[0].split('|'))
+            url = 'https://datahub.io/core/nasdaq-listings/r/nasdaq-listed-symbols.csv'
+            df = pd.read_csv(url)
             return df['Symbol'].dropna().unique().tolist()
         elif index == "S&P500":
             url = 'https://datahub.io/core/s-and-p-500-companies/r/constituents.csv'
@@ -34,10 +50,8 @@ def load_index_symbols(index):
             if not symbol_col:
                 return []
             return df[symbol_col].dropna().unique().tolist()
-        elif index == "NYSE":
-            url = 'https://old.nasdaq.com/screening/companies-by-industry.aspx?exchange=NYSE&render=download'
-            df = pd.read_csv(url)
-            return df['Symbol'].dropna().unique().tolist()
+        elif index in ["NYSE", "AMEX"]:
+            return get_nyse_amex_symbols()
         else:
             return []
     except Exception as e:
@@ -130,6 +144,12 @@ def fetch_stock_data(symbols):
     progress_text.text("Scan complete.")
     if debug_mode:
         debug_output.text("\n".join(debug_log[-10:]))
+        with open("skipped_symbols_log.txt", "w") as f:
+            for log in debug_log:
+                f.write(log + "\n")
+        with open("skipped_symbols_log.txt", "rb") as f:
+            st.download_button("Download Skipped Symbols Log", f, file_name="skipped_symbols_log.txt")
+
     return pd.DataFrame(data)
 
 # ------------------------------
@@ -139,7 +159,7 @@ st.title("📈 Market Demand & Supply Stock Scanner")
 
 with st.sidebar:
     st.header("🔧 Scanner Settings")
-    source = st.radio("Select Symbol Source", ["NASDAQ", "S&P500", "NYSE", "Upload File"])
+    source = st.radio("Select Symbol Source", ["NASDAQ", "S&P500", "NYSE", "AMEX", "Upload File"])
 
     symbols = []
     if source == "Upload File":
@@ -156,7 +176,7 @@ with st.sidebar:
     price_change_filter = st.number_input("Min % Price Increase Today", min_value=0.0, max_value=100.0, value=10.0)
     rel_vol_filter = st.number_input("Min Relative Volume (x Avg)", min_value=0.0, max_value=20.0, value=5.0)
     debug_mode = st.checkbox("Enable Debug Log")
-    
+
 scanner_ready = symbols is not None and len(symbols) > 0
 
 if st.button("🔍 Run Scanner", disabled=not scanner_ready):
@@ -168,3 +188,4 @@ if st.button("🔍 Run Scanner", disabled=not scanner_ready):
             st.dataframe(df)
         else:
             st.warning("No stocks matched the criteria.")
+
