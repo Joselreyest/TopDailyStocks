@@ -19,8 +19,17 @@ EOD_API_KEY = os.getenv("EOD_API_KEY", "")
 # Utility Functions
 # ------------------------------
 def load_symbols_from_file(uploaded_file):
-    df = pd.read_csv(uploaded_file)
-    return df['Symbol'].dropna().unique().tolist()
+    try:
+        df = pd.read_csv(uploaded_file)
+        symbol_col = next((col for col in df.columns if col.strip().lower() == 'symbol'), None)
+        if symbol_col:
+            return df[symbol_col].dropna().unique().tolist()
+        else:
+            st.error("Uploaded file must contain a 'Symbol' column.")
+            return []
+    except Exception as e:
+        st.error(f"Error reading uploaded file: {e}")
+        return []
 
 def load_index_symbols(source):
     try:
