@@ -8,6 +8,11 @@ from bs4 import BeautifulSoup
 import time
 
 # ------------------------------
+# Configuration
+# ------------------------------
+EOD_API_KEY = "688b9f9c017ae7.26013057"  # Replace with your actual API key
+
+# ------------------------------
 # Helper functions
 # ------------------------------
 def load_symbols_from_file(uploaded_file):
@@ -20,15 +25,23 @@ def load_symbols_from_file(uploaded_file):
 
 def get_exchange_symbols(exchange):
     try:
-        url_map = {
-            "NYSE": "https://old.nasdaq.com/screening/companies-by-name.aspx?letter=0&exchange=nyse&render=download",
-            "AMEX": "https://old.nasdaq.com/screening/companies-by-name.aspx?letter=0&exchange=amex&render=download"
+        exchange_map = {
+            "NYSE": "US",
+            "AMEX": "US",
+            "NASDAQ": "US"
         }
-        url = url_map.get(exchange)
-        if not url:
+        country_code = exchange_map.get(exchange.upper())
+        if not country_code:
             raise ValueError("Unsupported exchange")
-        df = pd.read_csv(url)
-        return df['Symbol'].dropna().unique().tolist()
+
+        url = f"https://eodhistoricaldata.com/api/exchange-symbol-list/{country_code}?api_token={EOD_API_KEY}&fmt=json"
+        response = requests.get(url)
+        if response.status_code != 200:
+            raise ValueError(f"EOD API error: {response.status_code}")
+
+        symbols_data = response.json()
+        filtered = [item['Code'] for item in symbols_data if item.get("Exchange", "").upper() == exchange.upper()]
+        return filtered
     except Exception as e:
         st.error(f"Failed to load {exchange} symbols: {e}")
         return []
