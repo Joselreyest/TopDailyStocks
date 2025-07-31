@@ -6,6 +6,7 @@ import requests
 import io
 from bs4 import BeautifulSoup
 import time
+import StringIO
 
 # ------------------------------
 # Helper functions
@@ -20,19 +21,33 @@ def load_symbols_from_file(uploaded_file):
 
 def get_nyse_amex_symbols():
     try:
-        url = 'https://www.advfn.com/nyse/newyorkstockexchange.asp'
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(url, headers=headers)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        tables = soup.find_all("table", class_="market")
-        symbols = set()
-        for table in tables:
-            rows = table.find_all("tr")
-            for row in rows[1:]:
-                cols = row.find_all("td")
-                if cols:
-                    symbols.add(cols[0].text.strip())
-        return list(symbols)
+        """
+        Fetches all NYSE & AMEX-listed stock symbols from NASDAQ's FTP.
+        Returns: List of tickers (e.g., ['AAPL', 'MSFT', ...])
+        """
+        # NYSE-listed stocks
+        nyse_url = "https://www.nasdaq.com/market-activity/stocks/screener?exchange=NYSE"
+        # AMEX-listed stocks
+        amex_url = "https://www.nasdaq.com/market-activity/stocks/screener?exchange=AMEX"
+    
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+    
+        def fetch_symbols(url):
+            try:
+                response = requests.get(url, headers=headers)
+                tables = pd.read_html(StringIO(response.text))
+                df = tables[0]  # First table contains the symbols
+                return df["Symbol"].tolist()
+            except Exception as e:
+                print(f"Failed to fetch: {e}")
+                return []
+    
+        nyse_symbols = fetch_symbols(nyse_url)
+        amex_symbols = fetch_symbols(amex_url)
+    
+        return list(set(nyse_symbols + amex_symbols))  # Remove duplicates
     except Exception as e:
         st.error(f"Failed to load NYSE/AMEX symbols: {e}")
         return []
