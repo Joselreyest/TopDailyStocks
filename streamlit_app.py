@@ -61,6 +61,18 @@ def load_index_symbols(index):
         st.error(f"Failed to load symbols for {index}: {e}")
         return []
 
+def load_symbols_from_file(file):
+    try:
+        df = pd.read_csv(file)
+        symbol_col = next((col for col in df.columns if col.strip().lower() == "symbol"), None)
+        if not symbol_col:
+            st.error("No 'Symbol' column found in the uploaded file.")
+            return []
+        return df[symbol_col].dropna().unique().tolist()
+    except Exception as e:
+        st.error(f"Error reading file: {e}")
+        return []
+
 def fetch_latest_news(symbol):
     try:
         url = f"https://finviz.com/quote.ashx?t={symbol}"
@@ -169,6 +181,16 @@ with st.sidebar:
     st.header("🔧 Scanner Settings")
     source = st.radio("Select Symbol Source", ["NASDAQ", "S&P500", "NYSE", "AMEX", "Upload File"])
 
+    if source == "Upload File":
+        uploaded_file = st.file_uploader("Upload CSV with 'Symbol' column")
+        if uploaded_file:
+            symbols_from_file = load_symbols_from_file(uploaded_file)
+        else:
+            symbols_from_file = []
+    else:
+        uploaded_file = None
+        symbols_from_file = []
+
     price_min, price_max = st.slider("Price Range ($)", 0.01, 100.0, (2.0, 20.0))
     max_float = st.slider("Max Float (shares)", 200_000, 10_000_000, 10_000_000)
     top_n = st.slider("Top N Stocks to Show", 1, 20, 10)
@@ -180,9 +202,8 @@ with st.sidebar:
 if st.button("🔍 Run Scanner"):
     with st.spinner("Preparing symbol list..."):
         if source == "Upload File":
-            uploaded_file = st.file_uploader("Upload CSV with 'Symbol' column")
-            if uploaded_file:
-                symbols = load_symbols_from_file(uploaded_file)
+            if uploaded_file and symbols_from_file:
+                symbols = symbols_from_file
             else:
                 st.warning("Please upload a file.")
                 symbols = []
