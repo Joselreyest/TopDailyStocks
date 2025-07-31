@@ -21,14 +21,12 @@ EOD_API_KEY = os.getenv("EOD_API_KEY", "")
 def load_symbols_from_file(uploaded_file):
     try:
         df = pd.read_csv(uploaded_file)
-        symbol_col = next((col for col in df.columns if col.strip().lower() == 'symbol'), None)
-        if symbol_col:
-            return df[symbol_col].dropna().unique().tolist()
-        else:
+        if 'Symbol' not in df.columns:
             st.error("Uploaded file must contain a 'Symbol' column.")
             return []
+        return df['Symbol'].dropna().unique().tolist()
     except Exception as e:
-        st.error(f"Error reading uploaded file: {e}")
+        st.error(f"Error reading file: {e}")
         return []
 
 def load_index_symbols(source):
@@ -118,45 +116,45 @@ def fetch_data_eod(symbol):
 
 def process_symbol(symbol):
     try:
-        stock = yf.Ticker(symbol)
-        hist = stock.history(period="1d")
-        if hist.empty:
+        ticker = yf.Ticker(symbol)
+        data = ticker.history(period="1d")
+        if data.empty:
             return None, ["No intraday data"]
 
-        latest = hist.iloc[-1]
-        open_price = latest['Open']
-        close_price = latest['Close']
-        volume = latest['Volume']
-        current_price = close_price
-
-        pct_change = ((close_price - open_price) / open_price) * 100
-        avg_vol = stock.info.get('averageVolume') or 1
-        rel_vol = volume / avg_vol
-
-        price = current_price
-        free_float = stock.info.get('floatShares') or 0
+        info = ticker.info
 
         reasons = []
-        if pct_change < price_change_filter:
-            reasons.append("Price change below threshold")
-        if rel_vol < rel_vol_filter:
-            reasons.append("Rel Vol too low")
-        if not (price_min <= price <= price_max):
-            reasons.append("Outside price range")
-        if free_float > max_float:
-            reasons.append("Float too high")
+        current = data["Close"].iloc[-1]
+        prev_close = data["Close"].iloc[0]
+        pct_change = ((current - prev_close) / prev_close) * 100
 
-        if not reasons:
-            return {
-                "Symbol": symbol,
-                "% Change": round(pct_change, 2),
-                "Price": round(price, 2),
-                "Rel Vol": round(rel_vol, 2),
-                "Volume": volume,
-                "Float": free_float
-            }, None
-        else:
+        if pct_change < price_change_filter:
+            reasons.append("% change below threshold")
+
+        volume = data["Volume"].iloc[-1]
+        avg_volume = info.get("averageVolume") or 0
+        if avg_volume == 0 or volume / avg_volume < rel_vol_filter:
+            reasons.append("Low relative volume")
+
+        if not (price_min <= current <= price_max):
+            reasons.append("Price out of range")
+
+        free_float = info.get("floatShares") or 0
+        if free_float > max_float:
+            reasons.append("Free float too high")
+
+        if reasons:
             return None, reasons
+
+        return {
+            "Symbol": symbol,
+            "Price": round(current, 2),
+            "% Change": round(pct_change, 2),
+            "Volume": f"{volume:,}",
+            "Avg Volume": f"{avg_volume:,}",
+            "Float": f"{free_float:,}"
+        }, None
+
     except Exception as e:
         return None, [str(e)]
 
@@ -179,15 +177,15 @@ def app():
 
     if source == "Upload File":
         uploaded_file = st.file_uploader("Upload CSV with 'Symbol' column")
-        if uploaded_file is not None:
+        if uploaded_file:
             symbol_list = load_symbols_from_file(uploaded_file)
     else:
         with st.spinner("Loading symbols..."):
             symbol_list = load_index_symbols(source)
 
-    run_button = st.button("Run Scanner", disabled=not bool(symbol_list))
+    run_scan = st.button("Run Scanner", disabled=(source == "Upload File" and not symbol_list))
 
-    if run_button:
+    if run_scan:
         if not symbol_list:
             st.warning("No symbols to scan. Please check your selection or upload.")
             return
@@ -197,8 +195,11 @@ def app():
         results = []
         skipped = {}
 
+        progress = st.empty()
         progress_bar = st.progress(0)
         total = len(symbol_list)
+        counter = {"count": 0}
+        lock = Lock()
 
         def worker(symbol):
             result, reasons = process_symbol(symbol)
@@ -206,21 +207,19 @@ def app():
                 results.append(result)
             elif reasons:
                 skipped[symbol] = reasons
-            progress_bar.progress(min(len(results) + len(skipped), total) / total)
+            with lock:
+                counter["count"] += 1
+                progress_bar.progress(counter["count"] / total)
 
         with ThreadPoolExecutor(max_workers=20) as executor:
-            executor.map(worker, symbol_list)
+            futures = [executor.submit(worker, symbol) for symbol in symbol_list]
+            for f in futures:
+                f.result()
 
         progress_bar.empty()
 
         if results:
             df = pd.DataFrame(results)
-            # Format Volume and Float with commas
-            if 'Volume' in df.columns:
-                df['Volume'] = df['Volume'].apply(lambda x: f"{x:,}")
-            if 'Float' in df.columns:
-                df['Float'] = df['Float'].apply(lambda x: f"{x:,}")
-       
             st.success(f"Found {len(df)} matching stocks")
             st.dataframe(df)
 
@@ -234,8 +233,7 @@ def app():
 
             log_csv = skip_log.to_csv(index=False).encode('utf-8')
             st.download_button("Download Skipped Log", log_csv, "skipped_symbols.csv", "text/csv")
-# ------------------------------
-# Run App
-# ------------------------------
+
+# Call app
 if __name__ == '__main__':
     app()
