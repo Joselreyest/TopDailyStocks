@@ -101,8 +101,8 @@ def has_news_event(symbol):
 def scan_symbols(symbols, price_range, rel_volume_range, percent_gain_range, news_enabled, float_limit):
     results = []
     total = len(symbols)
-    progress_placeholder = st.empty()
-    progress_text = st.empty()
+    status_text = st.empty()
+    progress_bar = st.progress(0.0)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {
@@ -130,8 +130,8 @@ def scan_symbols(symbols, price_range, rel_volume_range, percent_gain_range, new
                         results.append(result)
 
             completed = i + 1
-            progress_placeholder.progress(completed / total)
-            progress_text.text(f"Scanned {completed}/{total} symbols")
+            progress_bar.progress(completed / total)
+            status_text.text(f"Scanned {completed}/{total} symbols")
             time.sleep(RATE_LIMIT_DELAY)
 
     return results
