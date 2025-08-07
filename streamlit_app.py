@@ -4,9 +4,12 @@ import yfinance as yf
 import datetime
 import requests
 import io
+from io import StringIO
 from bs4 import BeautifulSoup
 import time
-from concurrent.futures import ThreadPoolExecutor
+import concurrent.futures 
+from concurrent import futures
+import ThreadPoolExecutor
 from functools import lru_cache
 import os
 from threading import Lock
