@@ -9,7 +9,6 @@ from bs4 import BeautifulSoup
 import time
 import concurrent.futures 
 from concurrent import futures
-import ThreadPoolExecutor
 from functools import lru_cache
 import os
 from threading import Lock
