@@ -137,7 +137,7 @@ def scan_symbols(symbols, price_range, min_rel_volume):
 
     return results
     
-def load_index_symbols(source):
+def get_index_symbols(source):
     try:
         if source == "NASDAQ":
             url = f"https://eodhistoricaldata.com/api/exchange-symbol-list/NASDAQ?api_token={EOD_API_KEY}&fmt=json"
