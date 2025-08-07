@@ -87,6 +87,7 @@ def fetch_float_from_eod(symbol):
 def scan_symbols(symbols, price_range, min_rel_volume):
     results = []
     total = len(symbols)
+    progress_bar = st.empty()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {
@@ -100,7 +101,7 @@ def scan_symbols(symbols, price_range, min_rel_volume):
                     results.append(result)
 
             time.sleep(RATE_LIMIT_DELAY)
-            st.progress((i + 1) / total)
+            progress_bar.progress((i + 1) / total)
 
     return results
 
