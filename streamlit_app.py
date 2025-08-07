@@ -15,6 +15,8 @@ load_dotenv()
 # Constants
 DEFAULT_PRICE_RANGE = (2, 20)
 DEFAULT_REL_VOLUME = 5
+DEFAULT_PERCENT_GAIN = (4, 15)
+DEFAULT_FLOAT_LIMIT = 10_000_000
 MAX_WORKERS = 5
 RATE_LIMIT_DELAY = 1  # seconds
 EOD_API_KEY = os.getenv("EOD_API_KEY")
@@ -44,11 +46,12 @@ def fetch_info(ticker_symbol):
             return None
 
         price = info.get("regularMarketPrice")
+        prev_close = info.get("regularMarketPreviousClose")
         avg_volume = info.get("averageVolume")
         volume = info.get("volume")
         float_shares = info.get("floatShares")
 
-        if not all([price, avg_volume, volume]):
+        if not all([price, prev_close, avg_volume, volume]):
             SKIPPED_SYMBOLS_LOG.append((ticker_symbol, "Missing volume/price data"))
             return None
 
@@ -59,6 +62,7 @@ def fetch_info(ticker_symbol):
                 return None
 
         rel_volume = volume / avg_volume if avg_volume else 0
+        percent_gain = ((price - prev_close) / prev_close) * 100 if prev_close else 0
 
         return {
             "Symbol": ticker_symbol,
@@ -66,6 +70,7 @@ def fetch_info(ticker_symbol):
             "Volume": volume,
             "Rel Volume": rel_volume,
             "Float": float_shares,
+            "% Gain": percent_gain,
         }
     except Exception as e:
         SKIPPED_SYMBOLS_LOG.append((ticker_symbol, f"Exception: {e}"))
@@ -83,7 +88,7 @@ def fetch_float_from_eod(symbol):
     except:
         return None
 
-def scan_symbols(symbols, price_range, min_rel_volume):
+def scan_symbols(symbols, price_range, rel_volume_range, percent_gain_range, news_enabled, float_limit):
     results = []
     total = len(symbols)
     progress_placeholder = st.empty()
@@ -97,8 +102,25 @@ def scan_symbols(symbols, price_range, min_rel_volume):
         for i, future in enumerate(concurrent.futures.as_completed(futures)):
             result = future.result()
             if result:
-                if price_range[0] <= result["Price"] <= price_range[1] and result["Rel Volume"] >= min_rel_volume:
-                    results.append(result)
+                price = result["Price"]
+                rel_vol = result["Rel Volume"]
+                percent_gain = result["% Gain"]
+                float_shares = result["Float"]
+
+                if (
+                    price_range[0] <= price <= price_range[1]
+                    and rel_volume_range[0] <= rel_vol <= rel_volume_range[1]
+                    and percent_gain_range[0] <= percent_gain <= percent_gain_range[1]
+                    and float_shares <= float_limit
+                ):
+                    # News check placeholder (future implementation)
+                    if news_enabled:
+                        has_news = True  # Placeholder: Assume all have news for now
+                    else:
+                        has_news = True
+
+                    if has_news:
+                        results.append(result)
 
             completed = i + 1
             progress_placeholder.progress(completed / total)
@@ -158,13 +180,16 @@ def app():
             symbol_list = get_index_symbols(symbol_source)
 
         st.markdown("---")
-        price_range = st.slider("Price Range ($)", 0.01, 100.0, (float(DEFAULT_PRICE_RANGE[0]), float(DEFAULT_PRICE_RANGE[1])), 0.01)
-        min_rel_volume = st.slider("Min Relative Volume", 1.0, 20.0, float(DEFAULT_REL_VOLUME), 0.5)
+        price_range = st.slider("Price Range ($)", 0.01, 100.0, DEFAULT_PRICE_RANGE, 0.01)
+        rel_volume_range = st.slider("Relative Volume (x)", 1.0, 20.0, (3.0, 10.0), 0.5)
+        percent_gain_range = st.slider("% Gain Today", -10.0, 50.0, DEFAULT_PERCENT_GAIN, 0.5)
+        news_enabled = st.checkbox("Has News Event", value=False)
+        float_limit = st.number_input("Max Float (Shares)", min_value=1_000, max_value=100_000_000, value=DEFAULT_FLOAT_LIMIT, step=100_000)
         run_scan = st.button("🚀 Run Scanner", disabled=(len(symbol_list) == 0))
 
     if run_scan:
         with st.spinner("Scanning symbols, please wait..."):
-            results = scan_symbols(symbol_list, price_range, min_rel_volume)
+            results = scan_symbols(symbol_list, price_range, rel_volume_range, percent_gain_range, news_enabled, float_limit)
 
         if results:
             df = pd.DataFrame(results)
