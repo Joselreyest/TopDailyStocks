@@ -11,11 +11,23 @@ from functools import lru_cache
 import os
 from threading import Lock
 from stqdm import stqdm
+from io import StringIO
+from dotenv import load_dotenv
 
+load_dotenv()
 # ------------------------------
 # Configuration
 # ------------------------------
 EOD_API_KEY = os.getenv("EOD_API_KEY", "")
+
+# Constants
+DEFAULT_PRICE_RANGE = (2, 20)
+DEFAULT_REL_VOLUME = 5
+MAX_WORKERS = 5
+RATE_LIMIT_DELAY = 1  # seconds
+EOD_API_KEY = os.getenv("EOD_API_KEY")
+
+SKIPPED_SYMBOLS_LOG = []
 
 # ------------------------------
 # Utility Functions
@@ -31,6 +43,100 @@ def load_symbols_from_file(uploaded_file):
         st.error(f"Error reading file: {e}")
         return []
 
+def fetch_info(ticker_symbol):
+    try:
+        ticker = yf.Ticker(ticker_symbol)
+        info = ticker.info
+        if info is None:
+            return None
+
+        price = info.get("regularMarketPrice")
+        avg_volume = info.get("averageVolume")
+        volume = info.get("volume")
+        float_shares = info.get("floatShares")
+
+        if not all([price, avg_volume, volume]):
+            SKIPPED_SYMBOLS_LOG.append((ticker_symbol, "Missing volume/price data"))
+            return None
+
+        if float_shares is None:
+            float_shares = fetch_float_from_eod(ticker_symbol)
+            if float_shares is None:
+                SKIPPED_SYMBOLS_LOG.append((ticker_symbol, "Missing float data"))
+                return None
+
+        rel_volume = volume / avg_volume if avg_volume else 0
+
+        return {
+            "Symbol": ticker_symbol,
+            "Price": price,
+            "Volume": volume,
+            "Rel Volume": rel_volume,
+            "Float": float_shares,
+        }
+    except Exception as e:
+        SKIPPED_SYMBOLS_LOG.append((ticker_symbol, f"Exception: {e}"))
+        return None
+
+def fetch_float_from_eod(symbol):
+    try:
+        url = f"https://eodhistoricaldata.com/api/fundamentals/{symbol}.US?api_token={EOD_API_KEY}"
+        response = requests.get(url)
+        if response.status_code != 200:
+            return None
+        data = response.json()
+        shares_float = data.get("SharesStats", {}).get("SharesFloat")
+        return shares_float
+    except:
+        return None
+
+def fetch_data_eod(symbol):
+    try:
+        url = f"https://eodhistoricaldata.com/api/fundamentals/{symbol}.US?api_token={EOD_API_KEY}"
+        r = requests.get(url)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        quote = data.get("General", {})
+        return {
+            'symbol': symbol,
+            'name': quote.get("Name", ""),
+            'price': quote.get("PreviousClose", 0),
+            'percent_change': 0,  # EOD doesn't give today's change
+            'volume': data.get("Highlights", {}).get("VolAvg", 0),
+            'avg_volume': data.get("Highlights", {}).get("VolAvg", 0),
+            'float': data.get("SharesStats", {}).get("SharesFloat", 0),
+            'market_cap': data.get("Highlights", {}).get("MarketCapitalization", 0),
+            'pe_ratio': data.get("Valuation", {}).get("TrailingPE", None),
+            'sector': quote.get("Sector", ""),
+            'analyst_rating': "",
+            'volatility': data.get("Technicals", {}).get("Beta", None),
+            'pre_market_price': None
+        }
+    except:
+        return None
+        
+def scan_symbols(symbols, price_range, min_rel_volume):
+    results = []
+    total = len(symbols)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {
+            executor.submit(fetch_info, symbol): symbol for symbol in symbols
+        }
+
+        for i, future in enumerate(concurrent.futures.as_completed(futures)):
+            result = future.result()
+            if result:
+                if price_range[0] <= result["Price"] <= price_range[1] and result["Rel Volume"] >= min_rel_volume:
+                    results.append(result)
+
+            # Rate limit handling
+            time.sleep(RATE_LIMIT_DELAY)
+            st.progress((i + 1) / total)
+
+    return results
+    
 def load_index_symbols(source):
     try:
         if source == "NASDAQ":
@@ -90,31 +196,7 @@ def fetch_data_yf(symbol):
     except:
         return None
 
-def fetch_data_eod(symbol):
-    try:
-        url = f"https://eodhistoricaldata.com/api/fundamentals/{symbol}.US?api_token={EOD_API_KEY}"
-        r = requests.get(url)
-        if r.status_code != 200:
-            return None
-        data = r.json()
-        quote = data.get("General", {})
-        return {
-            'symbol': symbol,
-            'name': quote.get("Name", ""),
-            'price': quote.get("PreviousClose", 0),
-            'percent_change': 0,  # EOD doesn't give today's change
-            'volume': data.get("Highlights", {}).get("VolAvg", 0),
-            'avg_volume': data.get("Highlights", {}).get("VolAvg", 0),
-            'float': data.get("SharesStats", {}).get("SharesFloat", 0),
-            'market_cap': data.get("Highlights", {}).get("MarketCapitalization", 0),
-            'pe_ratio': data.get("Valuation", {}).get("TrailingPE", None),
-            'sector': quote.get("Sector", ""),
-            'analyst_rating': "",
-            'volatility': data.get("Technicals", {}).get("Beta", None),
-            'pre_market_price': None
-        }
-    except:
-        return None
+
 
 def process_symbol(symbol):
     try:
@@ -131,19 +213,19 @@ def process_symbol(symbol):
         pct_change = ((current - prev_close) / prev_close) * 100
 
         if pct_change < price_change_filter:
-            reasons.append("% change below threshold")
+            reasons.append("% change below threshold", pct_change)
 
         volume = data["Volume"].iloc[-1]
         avg_volume = info.get("averageVolume") or 0
         if avg_volume == 0 or volume / avg_volume < rel_vol_filter:
-            reasons.append("Low relative volume")
+            reasons.append("Low relative volume", avg_volume)
 
         if not (price_min <= current <= price_max):
-            reasons.append("Price out of range")
+            reasons.append("Price out of range ", current)
 
         free_float = info.get("floatShares") or 0
         if free_float > max_float:
-            reasons.append("Free float too high")
+            reasons.append("Free float too high", free_float)
 
         if reasons:
             return None, reasons
@@ -163,66 +245,49 @@ def process_symbol(symbol):
 # ------------------------------
 # App Function
 # ------------------------------
+
 def app():
-    st.title("📈 Real-Time Stock Scanner")
+    st.set_page_config(page_title="Top Daily Stocks Scanner", layout="wide")
+    st.title("📈 Top Daily Stocks Scanner")
 
-    st.sidebar.header("Filter Criteria")
-    global price_change_filter, rel_vol_filter, price_min, price_max, max_float
+    # Sidebar - Inputs
+    with st.sidebar:
+        symbol_source = st.radio("Select Symbols Source", ["S&P500", "NASDAQ", "NYSE", "AMEX", "Upload File"])
 
-    price_change_filter = st.sidebar.slider("Min % Change Today", 0, 100, 10)
-    rel_vol_filter = st.sidebar.slider("Min Relative Volume", 0.0, 10.0, 5.0)
-    price_min, price_max = st.sidebar.slider("Price Range ($)", 0.01, 100.0, (2.0, 20.0))
-    max_float = st.sidebar.number_input("Max Free Float", value=100_000_000)
+        if symbol_source == "Upload File":
+            uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
+            if uploaded_file:
+                symbol_list = load_symbols_from_file(uploaded_file)
+            else:
+                symbol_list = []
+        else:
+            symbol_list = get_index_symbols(symbol_source)
 
-    source = st.radio("Choose Symbol Source", ["NASDAQ", "NYSE", "AMEX", "S&P500", "Upload File"])
-    symbol_list = []
-
-    if source == "Upload File":
-        uploaded_file = st.file_uploader("Upload CSV with 'Symbol' column")
-        if uploaded_file:
-            symbol_list = load_symbols_from_file(uploaded_file)
-    else:
-        with st.spinner("Loading symbols..."):
-            symbol_list = load_index_symbols(source)
-
-    run_scan = st.button("Run Scanner", disabled=(source == "Upload File" and not symbol_list))
+        st.markdown("---")
+        price_range = st.slider("Price Range ($)", 0.01, 100.0, DEFAULT_PRICE_RANGE, 0.01)
+        min_rel_volume = st.slider("Min Relative Volume", 1.0, 20.0, float(DEFAULT_REL_VOLUME), 0.5)
+        run_scan = st.button("🚀 Run Scanner", disabled=(len(symbol_list) == 0))
 
     if run_scan:
-        if not symbol_list:
-            st.warning("No symbols to scan. Please check your selection or upload.")
-            return
-
-        st.info(f"Scanning {len(symbol_list)} symbols. Please wait...")
-
-        results = []
-        skipped = {}
-
-        def worker(symbol):
-            result, reasons = process_symbol(symbol)
-            if result:
-                results.append(result)
-            elif reasons:
-                skipped[symbol] = reasons
-
-        with ThreadPoolExecutor(max_workers=20) as executor:
-            list(stqdm(executor.map(worker, symbol_list), total=len(symbol_list)))
+        with st.spinner("Scanning symbols, please wait..."):
+            results = scan_symbols(symbol_list, price_range, min_rel_volume)
 
         if results:
             df = pd.DataFrame(results)
-            st.success(f"Found {len(df)} matching stocks")
-            st.dataframe(df)
+            df["Volume"] = df["Volume"].apply(lambda x: f"{int(x):,}")
+            df["Float"] = df["Float"].apply(lambda x: f"{int(x):,}")
+            df = df.sort_values(by="Rel Volume", ascending=False)
+            st.success(f"✅ Found {len(df)} matching stocks")
+            st.dataframe(df, use_container_width=True)
+        else:
+            st.warning("No stocks matched the criteria.")
 
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button("Download Results as CSV", csv, "scan_results.csv", "text/csv")
+        if SKIPPED_SYMBOLS_LOG:
+            st.markdown("---")
+            st.subheader("⚠️ Skipped Symbols")
+            for symbol, reason in SKIPPED_SYMBOLS_LOG:
+                st.write(f"{symbol}: {reason}")
 
-        if skipped:
-            st.write("### Skipped Symbols Log")
-            skip_log = pd.DataFrame([{"Symbol": k, "Reasons": ", ".join(v)} for k, v in skipped.items()])
-            st.dataframe(skip_log)
-
-            log_csv = skip_log.to_csv(index=False).encode('utf-8')
-            st.download_button("Download Skipped Log", log_csv, "skipped_symbols.csv", "text/csv")
-
-# Call app
-if __name__ == '__main__':
+if __name__ == "__main__":
     app()
+
