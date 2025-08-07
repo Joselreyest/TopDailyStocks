@@ -1,29 +1,20 @@
+import os
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import datetime
-import requests
-import io
-from io import StringIO
-from bs4 import BeautifulSoup
+import concurrent.futures
+from concurrent import futures  # fallback
 import time
-import concurrent.futures 
-from concurrent import futures
-from functools import lru_cache
-import os
-from threading import Lock
-from stqdm import stqdm
+from datetime import datetime
 from io import StringIO
 from dotenv import load_dotenv
+import requests
+from bs4 import BeautifulSoup
 
 load_dotenv()
-# ------------------------------
-# Configuration
-# ------------------------------
-EOD_API_KEY = os.getenv("EOD_API_KEY", "")
 
 # Constants
-DEFAULT_PRICE_RANGE = (2.0, 20.0)
+DEFAULT_PRICE_RANGE = (2, 20)
 DEFAULT_REL_VOLUME = 5
 MAX_WORKERS = 5
 RATE_LIMIT_DELAY = 1  # seconds
@@ -31,25 +22,26 @@ EOD_API_KEY = os.getenv("EOD_API_KEY")
 
 SKIPPED_SYMBOLS_LOG = []
 
-# ------------------------------
-# Utility Functions
-# ------------------------------
+EXCHANGES = ["NASDAQ", "NYSE", "AMEX"]
+
 def load_symbols_from_file(uploaded_file):
     try:
         df = pd.read_csv(uploaded_file)
         if 'Symbol' not in df.columns:
-            st.error("Uploaded file must contain a 'Symbol' column.")
+            st.error("Uploaded CSV must contain a 'Symbol' column.")
             return []
         return df['Symbol'].dropna().unique().tolist()
     except Exception as e:
-        st.error(f"Error reading file: {e}")
+        st.error(f"Failed to load symbols from file: {e}")
         return []
 
 def fetch_info(ticker_symbol):
     try:
         ticker = yf.Ticker(ticker_symbol)
         info = ticker.info
-        if info is None:
+
+        if not info:
+            SKIPPED_SYMBOLS_LOG.append((ticker_symbol, "Missing Yahoo info"))
             return None
 
         price = info.get("regularMarketPrice")
@@ -92,32 +84,6 @@ def fetch_float_from_eod(symbol):
     except:
         return None
 
-def fetch_data_eod(symbol):
-    try:
-        url = f"https://eodhistoricaldata.com/api/fundamentals/{symbol}.US?api_token={EOD_API_KEY}"
-        r = requests.get(url)
-        if r.status_code != 200:
-            return None
-        data = r.json()
-        quote = data.get("General", {})
-        return {
-            'symbol': symbol,
-            'name': quote.get("Name", ""),
-            'price': quote.get("PreviousClose", 0),
-            'percent_change': 0,  # EOD doesn't give today's change
-            'volume': data.get("Highlights", {}).get("VolAvg", 0),
-            'avg_volume': data.get("Highlights", {}).get("VolAvg", 0),
-            'float': data.get("SharesStats", {}).get("SharesFloat", 0),
-            'market_cap': data.get("Highlights", {}).get("MarketCapitalization", 0),
-            'pe_ratio': data.get("Valuation", {}).get("TrailingPE", None),
-            'sector': quote.get("Sector", ""),
-            'analyst_rating': "",
-            'volatility': data.get("Technicals", {}).get("Beta", None),
-            'pre_market_price': None
-        }
-    except:
-        return None
-        
 def scan_symbols(symbols, price_range, min_rel_volume):
     results = []
     total = len(symbols)
@@ -133,12 +99,12 @@ def scan_symbols(symbols, price_range, min_rel_volume):
                 if price_range[0] <= result["Price"] <= price_range[1] and result["Rel Volume"] >= min_rel_volume:
                     results.append(result)
 
-            # Rate limit handling
             time.sleep(RATE_LIMIT_DELAY)
             st.progress((i + 1) / total)
 
     return results
-    
+
+@st.cache_data(show_spinner=False)
 def get_index_symbols(source):
     try:
         if source == "NASDAQ":
@@ -171,90 +137,13 @@ def get_index_symbols(source):
         st.error(f"Error loading symbols from {source}: {e}")
         return []
 
-
-def fetch_data_yf(symbol):
-    try:
-        ticker = yf.Ticker(symbol)
-        info = ticker.info
-        hist = ticker.history(period="1d")
-        if hist.empty or 'Open' not in hist.columns:
-            return None
-        today = hist.iloc[-1]
-        return {
-            'symbol': symbol,
-            'name': info.get("shortName", ""),
-            'price': today["Close"],
-            'percent_change': (today["Close"] - today["Open"]) / today["Open"] * 100,
-            'volume': today["Volume"],
-            'avg_volume': info.get("averageVolume", 0),
-            'float': info.get("floatShares", 0),
-            'market_cap': info.get("marketCap", 0),
-            'pe_ratio': info.get("trailingPE", None),
-            'sector': info.get("sector", ""),
-            'analyst_rating': info.get("recommendationKey", ""),
-            'volatility': info.get("beta", None),
-            'pre_market_price': info.get("preMarketPrice", None)
-        }
-    except:
-        return None
-
-
-
-def process_symbol(symbol):
-    try:
-        ticker = yf.Ticker(symbol)
-        data = ticker.history(period="1d")
-        if data.empty:
-            return None, ["No intraday data"]
-
-        info = ticker.info
-
-        reasons = []
-        current = data["Close"].iloc[-1]
-        prev_close = data["Close"].iloc[0]
-        pct_change = ((current - prev_close) / prev_close) * 100
-
-        if pct_change < price_change_filter:
-            reasons.append("% change below threshold", pct_change)
-
-        volume = data["Volume"].iloc[-1]
-        avg_volume = info.get("averageVolume") or 0
-        if avg_volume == 0 or volume / avg_volume < rel_vol_filter:
-            reasons.append("Low relative volume", avg_volume)
-
-        if not (price_min <= current <= price_max):
-            reasons.append("Price out of range ", current)
-
-        free_float = info.get("floatShares") or 0
-        if free_float > max_float:
-            reasons.append("Free float too high", free_float)
-
-        if reasons:
-            return None, reasons
-
-        return {
-            "Symbol": symbol,
-            "Price": round(current, 2),
-            "% Change": round(pct_change, 2),
-            "Volume": f"{volume:,}",
-            "Avg Volume": f"{avg_volume:,}",
-            "Float": f"{free_float:,}"
-        }, None
-
-    except Exception as e:
-        return None, [str(e)]
-
-# ------------------------------
-# App Function
-# ------------------------------
-
 def app():
     st.set_page_config(page_title="Top Daily Stocks Scanner", layout="wide")
     st.title("📈 Top Daily Stocks Scanner")
 
     # Sidebar - Inputs
     with st.sidebar:
-        symbol_source = st.radio("Select Symbols Source", ["S&P500", "NASDAQ", "NYSE", "AMEX", "Upload File"])
+        symbol_source = st.radio("Select Symbols Source", ["S&P500"] + EXCHANGES + ["Upload File"])
 
         if symbol_source == "Upload File":
             uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
@@ -281,6 +170,9 @@ def app():
             df = df.sort_values(by="Rel Volume", ascending=False)
             st.success(f"✅ Found {len(df)} matching stocks")
             st.dataframe(df, use_container_width=True)
+
+            csv = df.to_csv(index=False).encode("utf-8")
+            st.download_button("📥 Download CSV", csv, "top_stocks.csv", "text/csv")
         else:
             st.warning("No stocks matched the criteria.")
 
@@ -292,4 +184,3 @@ def app():
 
 if __name__ == "__main__":
     app()
-
