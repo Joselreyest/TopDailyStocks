@@ -155,7 +155,7 @@ def app():
             symbol_list = get_index_symbols(symbol_source)
 
         st.markdown("---")
-        price_range = st.slider("Price Range ($)", 0.01, 100.0, DEFAULT_PRICE_RANGE, 0.01)
+        price_range = st.slider("Price Range ($)", 0.01, 100.0, (float(DEFAULT_PRICE_RANGE[0]), float(DEFAULT_PRICE_RANGE[1])), 0.01)
         min_rel_volume = st.slider("Min Relative Volume", 1.0, 20.0, float(DEFAULT_REL_VOLUME), 0.5)
         run_scan = st.button("🚀 Run Scanner", disabled=(len(symbol_list) == 0))
 
