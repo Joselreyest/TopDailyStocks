@@ -88,6 +88,16 @@ def fetch_float_from_eod(symbol):
     except:
         return None
 
+def has_news_event(symbol):
+    try:
+        url = f"https://finance.yahoo.com/quote/{symbol}"
+        response = requests.get(url)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        headlines = soup.find_all("h3")
+        return len(headlines) > 0
+    except:
+        return False
+
 def scan_symbols(symbols, price_range, rel_volume_range, percent_gain_range, news_enabled, float_limit):
     results = []
     total = len(symbols)
@@ -114,11 +124,9 @@ def scan_symbols(symbols, price_range, rel_volume_range, percent_gain_range, new
                     and float_shares <= float_limit
                 ):
                     if news_enabled:
-                        has_news = True  # Placeholder
+                        if has_news_event(result["Symbol"]):
+                            results.append(result)
                     else:
-                        has_news = True
-
-                    if has_news:
                         results.append(result)
 
             completed = i + 1
