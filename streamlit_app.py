@@ -3,7 +3,6 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import concurrent.futures
-from concurrent import futures  # fallback
 import time
 from datetime import datetime
 from io import StringIO
@@ -87,7 +86,8 @@ def fetch_float_from_eod(symbol):
 def scan_symbols(symbols, price_range, min_rel_volume):
     results = []
     total = len(symbols)
-    progress_bar = st.empty()
+    progress_placeholder = st.empty()
+    progress_text = st.empty()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {
@@ -100,8 +100,10 @@ def scan_symbols(symbols, price_range, min_rel_volume):
                 if price_range[0] <= result["Price"] <= price_range[1] and result["Rel Volume"] >= min_rel_volume:
                     results.append(result)
 
+            completed = i + 1
+            progress_placeholder.progress(completed / total)
+            progress_text.text(f"Scanned {completed}/{total} symbols")
             time.sleep(RATE_LIMIT_DELAY)
-            progress_bar.progress((i + 1) / total)
 
     return results
 
