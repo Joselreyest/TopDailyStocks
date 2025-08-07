@@ -14,7 +14,7 @@ load_dotenv()
 
 # Constants
 DEFAULT_PRICE_RANGE = (2, 20)
-DEFAULT_REL_VOLUME = 5
+DEFAULT_REL_VOLUME = (3.0, 10.0)
 DEFAULT_PERCENT_GAIN = (4, 15)
 DEFAULT_FLOAT_LIMIT = 10_000_000
 MAX_WORKERS = 5
@@ -113,9 +113,8 @@ def scan_symbols(symbols, price_range, rel_volume_range, percent_gain_range, new
                     and percent_gain_range[0] <= percent_gain <= percent_gain_range[1]
                     and float_shares <= float_limit
                 ):
-                    # News check placeholder (future implementation)
                     if news_enabled:
-                        has_news = True  # Placeholder: Assume all have news for now
+                        has_news = True  # Placeholder
                     else:
                         has_news = True
 
@@ -181,9 +180,9 @@ def app():
 
         st.markdown("---")
         price_range = st.slider("Price Range ($)", 0.01, 100.0, DEFAULT_PRICE_RANGE, 0.01)
-        rel_volume_range = st.slider("Relative Volume (x)", 1.0, 20.0, (3.0, 10.0), 0.5)
+        rel_volume_range = st.slider("Relative Volume (x)", 1.0, 20.0, DEFAULT_REL_VOLUME, 0.5)
         percent_gain_range = st.slider("% Gain Today", -10.0, 50.0, DEFAULT_PERCENT_GAIN, 0.5)
-        news_enabled = st.checkbox("Has News Event", value=False)
+        news_enabled = st.checkbox("Must Have News Event", value=False)
         float_limit = st.number_input("Max Float (Shares)", min_value=1_000, max_value=100_000_000, value=DEFAULT_FLOAT_LIMIT, step=100_000)
         run_scan = st.button("🚀 Run Scanner", disabled=(len(symbol_list) == 0))
 
