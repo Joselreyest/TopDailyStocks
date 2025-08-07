@@ -21,7 +21,7 @@ load_dotenv()
 EOD_API_KEY = os.getenv("EOD_API_KEY", "")
 
 # Constants
-DEFAULT_PRICE_RANGE = (2, 20)
+DEFAULT_PRICE_RANGE = (2.0, 20.0)
 DEFAULT_REL_VOLUME = 5
 MAX_WORKERS = 5
 RATE_LIMIT_DELAY = 1  # seconds
