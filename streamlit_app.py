@@ -9,7 +9,7 @@ from io import StringIO
 from dotenv import load_dotenv
 import requests
 from bs4 import BeautifulSoup
-
+from io import BytesIO
 
 # load .env if present
 load_dotenv()
@@ -22,8 +22,8 @@ DEFAULT_REL_VOLUME = (3.0, 10.0)
 DEFAULT_PERCENT_GAIN = (4.0, 15.0)
 DEFAULT_FLOAT_LIMIT = 10_000_000
 
-MAX_WORKERS = 8            # keep moderate to reduce rate-limit issues
-RATE_LIMIT_DELAY = 0.5     # seconds between processed symbols (main thread)
+MAX_WORKERS = 10           # keep moderate to reduce rate-limit issues
+RATE_LIMIT_DELAY = 0.1     # seconds between processed symbols (main thread)
 EOD_API_KEY = os.getenv("EOD_API_KEY", "")
 
 EXCHANGES = ["NASDAQ", "NYSE", "AMEX"]
@@ -83,6 +83,22 @@ def load_symbols_from_file(uploaded_file):
 # ----------------------------
 # Data fetchers and helpers
 # ----------------------------
+# Function to fetch basic stock info for CSV
+def fetch_basic_info(symbol):
+    try:
+        t = yf.Ticker(symbol)
+        info = t.info
+        return {
+            "Symbol": symbol,
+            "Company Name": info.get("shortName", ""),
+            "Latest Price": info.get("regularMarketPrice", None),
+            "Industry": info.get("industry", ""),
+            "Market Cap": info.get("marketCap", None),
+            "Volume": info.get("volume", None)
+        }
+    except Exception:
+        return None
+        
 def fetch_float_from_eod(symbol: str):
     """Try to fetch float from EOD fundamentals. Returns int or None."""
     if not EOD_API_KEY:
@@ -371,12 +387,25 @@ def app():
         rate_limit_ui = st.slider("Delay between symbols (s)", 0.0, 5.0, RATE_LIMIT_DELAY, 0.1)
 
     # apply user-controlled concurrency and delay
-    MAX_WORKERS = int(max_workers_ui)
-    RATE_LIMIT_DELAY = float(rate_limit_ui)
+    MAX_WORKERS = st.slider("Max Workers", 1, 50, MAX_WORKERS)
+    RATE_LIMIT_DELAY = st.number_input("Rate Limit Delay (seconds)", 0.0, 2.0, RATE_LIMIT_DELAY)
 
     st.markdown("---")
+
+    symbols_df = load_symbols(selected_exchange)  # This should return a DataFrame with at leas
     st.write(f"Loaded {len(symbol_list)} symbols from `{symbol_source}`")
 
+  # --- New: Download CSV button ---
+    if not symbols_df.empty:
+        csv_buffer = BytesIO()
+        symbols_df.to_csv(csv_buffer, index=False)
+        st.download_button(
+            label="📥 Download Symbols List as CSV",
+            data=csv_buffer.getvalue(),
+            file_name=f"{selected_exchange}_symbols.csv",
+            mime="text/csv"
+        )
+        
     run_scan = st.button("🚀 Run Scanner", disabled=(len(symbol_list) == 0))
     if run_scan:
         # clear previous skipped log for this run
