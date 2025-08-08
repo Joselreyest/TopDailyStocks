@@ -22,7 +22,7 @@ DEFAULT_REL_VOLUME = (3.0, 10.0)
 DEFAULT_PERCENT_GAIN = (4.0, 15.0)
 DEFAULT_FLOAT_LIMIT = 10_000_000
 
-MAX_WORKERS = 5            # keep moderate to reduce rate-limit issues
+MAX_WORKERS = 8            # keep moderate to reduce rate-limit issues
 RATE_LIMIT_DELAY = 0.5     # seconds between processed symbols (main thread)
 EOD_API_KEY = os.getenv("EOD_API_KEY", "")
 
@@ -320,6 +320,8 @@ def scan_symbols(symbols,
 # Streamlit App UI
 # ----------------------------
 def app():
+    global MAX_WORKERS, RATE_LIMIT_DELAY  # must be before you use them
+    
     st.set_page_config(page_title="Top Daily Stocks Scanner", layout="wide")
     st.title("📈 Top Daily Stocks Scanner")
 
@@ -369,7 +371,6 @@ def app():
         rate_limit_ui = st.slider("Delay between symbols (s)", 0.0, 5.0, RATE_LIMIT_DELAY, 0.1)
 
     # apply user-controlled concurrency and delay
-    global MAX_WORKERS, RATE_LIMIT_DELAY
     MAX_WORKERS = int(max_workers_ui)
     RATE_LIMIT_DELAY = float(rate_limit_ui)
 
