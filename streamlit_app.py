@@ -19,13 +19,14 @@ load_dotenv()
 # ----------------------------
 DEFAULT_PRICE_RANGE = (2.0, 20.0)         # floats required by st.slider for range
 DEFAULT_REL_VOLUME = (3.0, 10.0)
-DEFAULT_PERCENT_GAIN = (4.0, 15.0)
-DEFAULT_FLOAT_LIMIT = 10_000_000
-
+DEFAULT_PRICE_RANGE = (2.0, 20.0)
+DEFAULT_FLOAT_MAX = 10_000_000
 MAX_WORKERS = 10           # keep moderate to reduce rate-limit issues
 RATE_LIMIT_DELAY = 0.1     # seconds between processed symbols (main thread)
-EOD_API_KEY = os.getenv("EOD_API_KEY", "")
 
+DEFAULT_PERCENT_GAIN = (4.0, 15.0)
+DEFAULT_FLOAT_LIMIT = 10_000_000
+EOD_API_KEY = os.getenv("EOD_API_KEY", "")
 EXCHANGES = ["NASDAQ", "NYSE", "AMEX"]
 
 # Store skipped symbols and reasons
@@ -35,6 +36,16 @@ SKIPPED_SYMBOLS_LOG = []
 # Symbol loading helpers
 # ----------------------------
 @st.cache_data(show_spinner=False)
+
+def load_symbols(exchange: str):
+    """Load list of symbols from CSV for the selected exchange."""
+    try:
+        df = pd.read_csv(f"data/{exchange}.csv")
+        return df
+    except Exception as e:
+        st.error(f"Error loading symbols for {exchange}: {e}")
+        return pd.DataFrame()
+        
 def get_index_symbols(source: str):
     """Load symbols for NASDAQ/NYSE/AMEX using EOD API, S&P500 from Wikipedia."""
     try:
@@ -213,27 +224,37 @@ def fetch_info(symbol: str):
         return None
 
 def fetch_stock_data(symbol):
+    """Fetch stock data using yfinance."""
     try:
-        data = yf.Ticker(symbol).history(period="1d", interval="1m")
-        if data.empty:
-            return None
-
-        last_price = data["Close"].iloc[-1]
-        prev_close = data["Close"].iloc[0]
-        percent_change = ((last_price - prev_close) / prev_close) * 100
-        avg_volume = data["Volume"].mean()
-        current_volume = data["Volume"].iloc[-1]
-        rel_volume = current_volume / avg_volume if avg_volume > 0 else 0
-
+        ticker = yf.Ticker(symbol)
+        info = ticker.info
         return {
             "Symbol": symbol,
-            "Price": last_price,
-            "Percent Change": percent_change,
-            "Relative Volume": rel_volume
+            "Company": info.get("shortName", ""),
+            "Latest Price": info.get("regularMarketPrice", None),
+            "Industry": info.get("industry", ""),
+            "Float": info.get("floatShares", None),
+            "Relative Volume": info.get("relativeVolume", None),
+            "Price Change %": info.get("regularMarketChangePercent", None),
+            "Has News": bool(info.get("news", []))
         }
-    except Exception as e:
+    except Exception:
         return None
-        
+
+def filter_stocks(df, price_change_range, rel_vol_range, price_range, float_max, news_filter, criteria_enabled):
+    """Apply filtering criteria to stock DataFrame."""
+    if criteria_enabled["price_change"]:
+        df = df[(df["Price Change %"] >= price_change_range[0]) & (df["Price Change %"] <= price_change_range[1])]
+    if criteria_enabled["rel_volume"]:
+        df = df[(df["Relative Volume"] >= rel_vol_range[0]) & (df["Relative Volume"] <= rel_vol_range[1])]
+    if criteria_enabled["price_range"]:
+        df = df[(df["Latest Price"] >= price_range[0]) & (df["Latest Price"] <= price_range[1])]
+    if criteria_enabled["float"]:
+        df = df[df["Float"] <= float_max]
+    if criteria_enabled["news"] and news_filter:
+        df = df[df["Has News"]]
+    return df
+    
 # ----------------------------
 # Scanner
 # ----------------------------
@@ -340,7 +361,8 @@ def app():
     
     st.set_page_config(page_title="Top Daily Stocks Scanner", layout="wide")
     st.title("📈 Top Daily Stocks Scanner")
-
+    st.markdown("Filter stocks based on demand/supply criteria.")
+    
     # Sidebar inputs
     with st.sidebar:
         st.header("Universe")
