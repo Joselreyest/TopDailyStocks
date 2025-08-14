@@ -26,57 +26,121 @@ EOD_API_KEY = os.getenv("EOD_API_KEY", "")
 
 EXCHANGES = ["NASDAQ", "NYSE", "AMEX"]
 
+HTTP_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "text/html,application/json",
+}
+
 # Store skipped symbols and reasons
 SKIPPED_SYMBOLS_LOG = []
+
+# ----------------------------
+# Utilities
+# ----------------------------
+def normalize_for_yf(sym: str) -> str:
+    """Convert tickers like BRK.B -> BRK-B for yfinance."""
+    return sym.replace(".", "-").upper().strip()
+
+def _safe_json_get(url: str, timeout: int = 20):
+    r = requests.get(url, headers=HTTP_HEADERS, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
 
 # ----------------------------
 # Symbol loading helpers
 # ----------------------------
 @st.cache_data(show_spinner=False)
 def get_index_symbols(source: str):
-    """Load symbols for NASDAQ/NYSE/AMEX from EOD API, S&P500 from Wikipedia."""
+    """
+    Load symbols for:
+      - S&P500 from Wikipedia
+      - NASDAQ, NYSE, AMEX from EOD Historical Data.
+    Adds robust fallbacks and normalization for yfinance.
+    Returns a simple Python list of ticker strings.
+    """
     try:
         if source in ("NASDAQ", "NYSE", "AMEX"):
             if not EOD_API_KEY:
                 st.error("EOD_API_KEY not set in environment. Can't load exchange list.")
                 return []
+
+            # Primary: direct exchange list (works for many exchanges)
             url = f"https://eodhistoricaldata.com/api/exchange-symbol-list/{source}?api_token={EOD_API_KEY}&fmt=json"
-            r = requests.get(url, timeout=20)
-            r.raise_for_status()
-            data = r.json()
-            return [item["Code"] for item in data if item.get("Code")]
+            try:
+                data = _safe_json_get(url)
+                if isinstance(data, list) and len(data) > 0:
+                    symbols = [item["Code"] for item in data if item.get("Code")]
+                    return sorted(set(normalize_for_yf(s) for s in symbols))
+            except Exception:
+                # fall back below
+                pass
+
+            # Fallback: get US list and filter by Exchange == source
+            us_url = f"https://eodhistoricaldata.com/api/exchange-symbol-list/US?api_token={EOD_API_KEY}&fmt=json"
+            try:
+                data = _safe_json_get(us_url)
+                if isinstance(data, list) and len(data) > 0:
+                    symbols = [
+                        item["Code"]
+                        for item in data
+                        if item.get("Code") and item.get("Exchange") == source
+                    ]
+                    return sorted(set(normalize_for_yf(s) for s in symbols))
+                else:
+                    st.error(f"EOD returned no data for US. Check API key/plan.")
+                    return []
+            except Exception as e:
+                st.error(f"Error loading {source} from EOD: {e}")
+                return []
+
         elif source == "S&P500":
             wiki_url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-            r = requests.get(wiki_url, timeout=20)
-            r.raise_for_status()
-            soup = BeautifulSoup(r.text, "html.parser")
-            table = soup.find("table", {"id": "constituents"})
-            if table is None:
+            try:
+                r = requests.get(wiki_url, headers=HTTP_HEADERS, timeout=20)
+                r.raise_for_status()
+                soup = BeautifulSoup(r.text, "html.parser")
+                table = soup.find("table", {"id": "constituents"})
+                if table is None:
+                    st.error("Could not find S&P 500 table on Wikipedia.")
+                    return []
+                df = pd.read_html(str(table))[0]
+                col = "Symbol" if "Symbol" in df.columns else df.columns[0]
+                syms = df[col].astype(str).str.strip().tolist()
+                # Normalize for yfinance (BRK.B -> BRK-B, BF.B -> BF-B, etc.)
+                return sorted(set(normalize_for_yf(s) for s in syms))
+            except Exception as e:
+                st.error(f"Error loading S&P500 from Wikipedia: {e}")
                 return []
-            df = pd.read_html(str(table))[0]
-            if "Symbol" in df.columns:
-                return df["Symbol"].astype(str).str.strip().tolist()
-            return df.iloc[:, 0].astype(str).str.strip().tolist()
+
+        else:
+            return []
     except Exception as e:
         st.error(f"Error loading symbols for {source}: {e}")
         return []
 
 def load_symbols_from_file(uploaded_file):
+    """Read CSV and return values in a 'Symbol'/'Ticker'/'Sym' column (normalized for yfinance)."""
     try:
         df = pd.read_csv(uploaded_file)
         symbol_col = next((c for c in df.columns if c.strip().lower() in ("symbol", "ticker", "sym")), None)
         if not symbol_col:
             st.error("Uploaded CSV must contain a 'Symbol' or 'Ticker' column.")
             return []
-        return df[symbol_col].dropna().astype(str).str.strip().unique().tolist()
+        return sorted(set(normalize_for_yf(s) for s in df[symbol_col].dropna().astype(str)))
     except Exception as e:
         st.error(f"Error reading uploaded file: {e}")
         return []
 
 # ----------------------------
-# Data fetchers
+# Data fetchers and helpers
 # ----------------------------
-def fetch_basic_info(symbol):
+def fetch_basic_info(symbol: str):
+    """Lightweight info for the pre-scan CSV."""
     try:
         t = yf.Ticker(symbol)
         info = t.info
@@ -86,17 +150,18 @@ def fetch_basic_info(symbol):
             "Latest Price": info.get("regularMarketPrice", None),
             "Industry": info.get("industry", ""),
             "Market Cap": info.get("marketCap", None),
-            "Volume": info.get("volume", None)
+            "Volume": info.get("volume", None),
         }
     except Exception:
         return None
 
 def fetch_float_from_eod(symbol: str):
+    """Try to fetch float from EOD fundamentals. Returns int or None."""
     if not EOD_API_KEY:
         return None
     try:
         url = f"https://eodhistoricaldata.com/api/fundamentals/{symbol}.US?api_token={EOD_API_KEY}"
-        r = requests.get(url, timeout=10)
+        r = requests.get(url, headers=HTTP_HEADERS, timeout=10)
         if r.status_code != 200:
             return None
         data = r.json()
@@ -106,9 +171,10 @@ def fetch_float_from_eod(symbol: str):
         return None
 
 def has_news_event(symbol: str) -> bool:
+    """Simple news check via scraping Yahoo Finance headlines (best-effort)."""
     try:
         url = f"https://finance.yahoo.com/quote/{symbol}"
-        r = requests.get(url, timeout=10)
+        r = requests.get(url, headers=HTTP_HEADERS, timeout=10)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
         headlines = soup.find_all("h3")
@@ -117,20 +183,28 @@ def has_news_event(symbol: str) -> bool:
         return False
 
 def fetch_info(symbol: str):
+    """
+    Primary data fetch using yfinance. Returns dict with required fields or None.
+    If float missing, attempts EOD fallback for float only.
+    """
     try:
         ticker = yf.Ticker(symbol)
+
+        # Try to get 2-day history (to compute percent change from previous close)
         hist = None
         try:
             hist = ticker.history(period="2d", interval="1d")
         except Exception:
             pass
 
+        # Use ticker.info for many fields
         info = {}
         try:
             info = ticker.info or {}
         except Exception:
             pass
 
+        # price determination: prefer real market price or last close
         price = info.get("regularMarketPrice")
         if price is None and hist is not None and not hist.empty:
             price = hist["Close"].iloc[-1]
@@ -143,60 +217,105 @@ def fetch_info(symbol: str):
 
         volume = info.get("volume")
         avg_volume = info.get("averageVolume")
+
+        # fallback to intraday history for volume
         if (volume is None or avg_volume is None) and hist is not None:
             try:
                 intraday = ticker.history(period="1d", interval="1m")
                 if not intraday.empty:
-                    volume = volume or int(intraday["Volume"].iloc[-1])
-                    avg_volume = avg_volume or int(intraday["Volume"].mean())
+                    if volume is None:
+                        volume = int(intraday["Volume"].iloc[-1])
+                    if avg_volume is None:
+                        avg_volume = int(intraday["Volume"].mean())
             except Exception:
                 pass
 
+        # if we still miss key numbers -> record skipped
         if price is None or prev_close is None or volume is None or avg_volume is None:
-            SKIPPED_SYMBOLS_LOG.append((symbol, "Missing price/volume data"))
+            SKIPPED_SYMBOLS_LOG.append((symbol, "Missing price/volume data from yfinance"))
             return None
 
-        float_shares = info.get("floatShares") or fetch_float_from_eod(symbol)
+        float_shares = info.get("floatShares")
+        if float_shares is None:
+            float_shares = fetch_float_from_eod(symbol)
 
-        rel_volume = (float(volume) / float(avg_volume)) if avg_volume else 0.0
-        percent_gain = ((float(price) - float(prev_close)) / float(prev_close) * 100) if prev_close else 0.0
+        try:
+            rel_volume = float(volume) / float(avg_volume) if avg_volume else 0.0
+        except Exception:
+            rel_volume = 0.0
+        try:
+            percent_gain = (
+                ((float(price) - float(prev_close)) / float(prev_close)) * 100
+                if prev_close else 0.0
+            )
+        except Exception:
+            percent_gain = 0.0
 
         return {
             "Symbol": symbol,
             "Price": float(price),
             "Volume": int(volume),
             "Avg Volume": int(avg_volume),
-            "Rel Volume": rel_volume,
+            "Rel Volume": float(rel_volume),
             "Float": int(float_shares) if float_shares is not None else None,
-            "% Gain": percent_gain,
+            "% Gain": float(percent_gain),
         }
     except Exception as e:
-        SKIPPED_SYMBOLS_LOG.append((symbol, f"Exception: {e}"))
+        SKIPPED_SYMBOLS_LOG.append((symbol, f"Exception fetching: {e}"))
         return None
 
 # ----------------------------
-# Cached symbol detail loader
+# Cached SYMBOL LIST loader (NOT the details)
 # ----------------------------
 @st.cache_data(show_spinner=False)
-def load_symbol_details(symbol_source, uploaded_file=None):
-    if symbol_source == "Upload File" and uploaded_file:
-        symbols = load_symbols_from_file(uploaded_file)
-    else:
-        symbols = get_index_symbols(symbol_source)
+def load_symbol_list(symbol_source: str):
+    """Returns pure list of tickers for the chosen source."""
+    if symbol_source in ("S&P500",) + tuple(EXCHANGES):
+        return get_index_symbols(symbol_source)
+    return []
 
-    details = []
-    for sym in symbols:
-        info = fetch_basic_info(sym)
-        if info:
-            details.append(info)
-    return pd.DataFrame(details)
+# ----------------------------
+# Pre-scan details builder (fast, concurrent)
+# ----------------------------
+@st.cache_data(show_spinner=True)
+def build_basic_info_df(symbols: list):
+    """Concurrent pre-scan to prepare the downloadable symbols CSV."""
+    if not symbols:
+        return pd.DataFrame(columns=["Symbol", "Company Name", "Latest Price", "Industry", "Market Cap", "Volume"])
+
+    results = []
+    max_workers = min(20, max(1, len(symbols)//50 or 4))  # reasonable concurrency
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(fetch_basic_info, s): s for s in symbols}
+        for fut in concurrent.futures.as_completed(futures):
+            rec = fut.result()
+            if rec:
+                results.append(rec)
+    if not results:
+        return pd.DataFrame(columns=["Symbol", "Company Name", "Latest Price", "Industry", "Market Cap", "Volume"])
+    df = pd.DataFrame(results).drop_duplicates(subset=["Symbol"])
+    # Sort for nicer UX
+    return df.sort_values(by="Symbol").reset_index(drop=True)
 
 # ----------------------------
 # Scanner
 # ----------------------------
-def scan_symbols(symbols, price_range, rel_volume_range, percent_gain_range,
-                 news_required, float_limit, enable_price, enable_rel_vol,
-                 enable_pct_gain, enable_news, enable_float, top_n):
+def scan_symbols(symbols,
+                 price_range,
+                 rel_volume_range,
+                 percent_gain_range,
+                 news_required,
+                 float_limit,
+                 enable_price,
+                 enable_rel_vol,
+                 enable_pct_gain,
+                 enable_news,
+                 enable_float,
+                 top_n):
+    """
+    Concurrently fetch symbols, apply enabled filters, and return results list.
+    UI updates (progress) happen in the main thread while collecting completed futures.
+    """
     results = []
     total = len(symbols)
     if total == 0:
@@ -214,19 +333,21 @@ def scan_symbols(symbols, price_range, rel_volume_range, percent_gain_range,
             try:
                 info = fut.result()
             except Exception as e:
-                SKIPPED_SYMBOLS_LOG.append((symbol, f"Error: {e}"))
+                SKIPPED_SYMBOLS_LOG.append((symbol, f"Worker exception: {e}"))
                 info = None
 
             completed += 1
             progress_bar.progress(completed / total)
             status_placeholder.text(f"Scanned {completed}/{total} — latest: {symbol}")
+
             time.sleep(RATE_LIMIT_DELAY)
 
-            if not info:
+            if info is None:
                 continue
 
+            # Float is required if float filter enabled
             if enable_float and (info.get("Float") is None):
-                SKIPPED_SYMBOLS_LOG.append((symbol, "Missing float"))
+                SKIPPED_SYMBOLS_LOG.append((symbol, "Missing float data"))
                 continue
 
             price = info.get("Price")
@@ -254,10 +375,11 @@ def scan_symbols(symbols, price_range, rel_volume_range, percent_gain_range,
 
     if results:
         df = pd.DataFrame(results).sort_values(by="% Gain", ascending=False)
-        if top_n:
+        if top_n and top_n > 0:
             df = df.head(top_n)
         return df.to_dict(orient="records")
-    return []
+    else:
+        return []
 
 # ----------------------------
 # App UI
@@ -272,12 +394,18 @@ def app():
         st.header("Universe")
         symbol_source = st.radio("Symbols source", ["S&P500"] + EXCHANGES + ["Upload File"])
         uploaded_file = None
+        symbol_list = []
+
         if symbol_source == "Upload File":
-            uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
+            uploaded_file = st.file_uploader("Upload CSV (must contain Symbol or Ticker column)", type=["csv"])
+            if uploaded_file:
+                symbol_list = load_symbols_from_file(uploaded_file)
+        else:
+            symbol_list = load_symbol_list(symbol_source)
 
         st.markdown("---")
-        st.header("Demand Filters")
-        enable_price = st.checkbox("Enable price filter", value=True)
+        st.header("Demand (turn ON/OFF each)")
+        enable_price = st.checkbox("Enable price range filter", value=True)
         price_range = st.slider("Price range ($)", 0.01, 100.0, DEFAULT_PRICE_RANGE, 0.01)
 
         enable_rel_vol = st.checkbox("Enable relative volume filter", value=True)
@@ -286,62 +414,100 @@ def app():
         enable_pct_gain = st.checkbox("Enable % gain filter", value=True)
         percent_gain_range = st.slider("% Gain Today", -50.0, 200.0, DEFAULT_PERCENT_GAIN, 0.1)
 
-        enable_news = st.checkbox("Enable news filter", value=False)
-        news_required = st.checkbox("Require news event", value=False) if enable_news else False
+        enable_news = st.checkbox("Enable news filter (requires internet scrape)", value=False)
+        news_required = st.checkbox("Require news event (when enabled)", value=False) if enable_news else False
 
         st.markdown("---")
-        st.header("Supply Filter")
-        enable_float = st.checkbox("Enable float filter", value=True)
-        float_limit = st.number_input("Max float", 1_000, 500_000_000, DEFAULT_FLOAT_LIMIT, 100_000)
+        st.header("Supply")
+        enable_float = st.checkbox("Enable float (supply) filter", value=True)
+        float_limit = st.number_input("Max float (shares)", min_value=1_000, max_value=500_000_000,
+                                      value=int(DEFAULT_FLOAT_LIMIT), step=100_000)
 
         st.markdown("---")
         st.header("Other")
         top_n = st.slider("Top N results", 1, 50, 10)
-        MAX_WORKERS = st.slider("Max Workers", 1, 50, MAX_WORKERS)
-        RATE_LIMIT_DELAY = st.number_input("Rate Limit Delay (s)", 0.0, 2.0, RATE_LIMIT_DELAY)
+        MAX_WORKERS = st.slider("Concurrency (max workers)", 1, 50, MAX_WORKERS)
+        RATE_LIMIT_DELAY = st.number_input("Delay between symbols (s)", 0.0, 2.0, RATE_LIMIT_DELAY)
 
-    # Load and show symbol details
-    symbols_df = load_symbol_details(symbol_source, uploaded_file)
-    st.write(f"Loaded {len(symbols_df)} symbols from `{symbol_source}`")
+    # ---- Show true symbol count (list) ----
+    st.write(f"Loaded **{len(symbol_list)}** symbols from `{symbol_source}`")
 
-    if not symbols_df.empty:
+    # ---- Build & download pre-scan CSV (basic info) before scanning ----
+    details_df = pd.DataFrame()
+    if symbol_list:
+        with st.spinner("Building symbols list (basic info) for download..."):
+            details_df = build_basic_info_df(symbol_list)
+
+        if details_df.empty:
+            st.warning(
+                "Symbol list loaded, but could not prefetch basic info (yfinance may be rate-limiting). "
+                "You can still run the scanner."
+            )
+
         csv_buffer = BytesIO()
-        symbols_df.to_csv(csv_buffer, index=False)
-        st.download_button(
-            label="📥 Download Symbols List CSV",
-            data=csv_buffer.getvalue(),
-            file_name=f"{symbol_source}_symbols.csv",
-            mime="text/csv"
-        )
+        # Prefer the detailed CSV when available; otherwise fall back to just symbols.
+        if not details_df.empty:
+            details_df.to_csv(csv_buffer, index=False)
+            st.download_button(
+                label="📥 Download Symbols List (with basic info)",
+                data=csv_buffer.getvalue(),
+                file_name=f"{symbol_source}_symbols.csv",
+                mime="text/csv",
+            )
+            st.caption(f"Prefetched basic info for {len(details_df)} symbols.")
+            # Optional: quick preview
+            st.dataframe(details_df.head(25), use_container_width=True)
+        else:
+            pd.DataFrame({"Symbol": symbol_list}).to_csv(csv_buffer, index=False)
+            st.download_button(
+                label="📥 Download Symbols (tickers only)",
+                data=csv_buffer.getvalue(),
+                file_name=f"{symbol_source}_symbols.csv",
+                mime="text/csv",
+            )
 
-    # Run scanner
-    run_scan = st.button("🚀 Run Scanner", disabled=symbols_df.empty)
+    # ---- Run scanner (always uses the pure list, not the details DF) ----
+    run_scan = st.button("🚀 Run Scanner", disabled=(len(symbol_list) == 0))
     if run_scan:
         SKIPPED_SYMBOLS_LOG.clear()
-        symbols = symbols_df["Symbol"].tolist()
-        with st.spinner("Scanning..."):
-            results = scan_symbols(symbols, price_range, rel_volume_range, percent_gain_range,
-                                   news_required, float_limit, enable_price, enable_rel_vol,
-                                   enable_pct_gain, enable_news, enable_float, top_n)
+        with st.spinner("Scanning symbols — this may take a while for large universes..."):
+            results = scan_symbols(
+                symbol_list,
+                price_range,
+                rel_volume_range,
+                percent_gain_range,
+                news_required,
+                float_limit,
+                enable_price,
+                enable_rel_vol,
+                enable_pct_gain,
+                enable_news,
+                enable_float,
+                top_n,
+            )
 
         if results:
             df = pd.DataFrame(results)
             display_df = df.copy()
-            if "Volume" in display_df:
+            if "Volume" in display_df.columns:
                 display_df["Volume"] = display_df["Volume"].apply(lambda x: f"{int(x):,}")
-            if "Float" in display_df:
+            if "Float" in display_df.columns:
                 display_df["Float"] = display_df["Float"].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "")
-            st.success(f"✅ Found {len(display_df)} matches")
+            st.success(f"✅ Found {len(display_df)} matching stocks")
             st.dataframe(display_df, use_container_width=True)
-            st.download_button("📥 Download Results CSV", df.to_csv(index=False).encode(), "scan_results.csv", "text/csv")
+
+            csv_bytes = df.to_csv(index=False).encode("utf-8")
+            st.download_button("📥 Download Results CSV", csv_bytes, file_name="scan_results.csv", mime="text/csv")
         else:
-            st.warning("No matches found.")
+            st.warning("No symbols matched the enabled criteria.")
 
         if SKIPPED_SYMBOLS_LOG:
+            st.markdown("---")
+            st.subheader("⚠️ Skipped / Problematic Symbols")
             skipped_df = pd.DataFrame(SKIPPED_SYMBOLS_LOG, columns=["Symbol", "Reason"])
-            st.subheader("⚠️ Skipped Symbols")
-            st.dataframe(skipped_df)
-            st.download_button("📥 Download Skipped Log", skipped_df.to_csv(index=False).encode(), "skipped_log.csv", "text/csv")
+            st.dataframe(skipped_df, use_container_width=True)
+            log_csv = skipped_df.to_csv(index=False).encode("utf-8")
+            st.download_button("📥 Download Skipped Log", log_csv, file_name="skipped_log.csv", mime="text/csv")
 
 if __name__ == "__main__":
     app()
