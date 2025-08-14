@@ -10,7 +10,7 @@ import requests
 from bs4 import BeautifulSoup
 from io import BytesIO
 
-# load .env if present
+# Load .env if present
 load_dotenv()
 
 # ----------------------------
@@ -27,7 +27,6 @@ EOD_API_KEY = os.getenv("EOD_API_KEY", "")
 
 EXCHANGES = ["NASDAQ", "NYSE", "AMEX"]
 
-# Store skipped symbols and reasons
 SKIPPED_SYMBOLS_LOG = []
 
 # ----------------------------
@@ -46,7 +45,6 @@ def get_index_symbols(source: str):
             r.raise_for_status()
             data = r.json()
             return [item["Code"] for item in data if item.get("Code")]
-
         elif source == "S&P500":
             wiki_url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
             r = requests.get(wiki_url, timeout=20)
@@ -56,8 +54,9 @@ def get_index_symbols(source: str):
             if table is None:
                 return []
             df = pd.read_html(str(table))[0]
-            return df["Symbol"].astype(str).str.strip().tolist()
-
+            if "Symbol" in df.columns:
+                return df["Symbol"].astype(str).str.strip().tolist()
+            return df.iloc[:, 0].astype(str).str.strip().tolist()
     except Exception as e:
         st.error(f"Error loading symbols for {source}: {e}")
         return []
@@ -120,16 +119,17 @@ def has_news_event(symbol: str) -> bool:
 def fetch_info(symbol: str):
     try:
         ticker = yf.Ticker(symbol)
+        hist = None
         try:
             hist = ticker.history(period="2d", interval="1d")
         except Exception:
-            hist = None
+            pass
 
         info = {}
         try:
             info = ticker.info or {}
         except Exception:
-            info = {}
+            pass
 
         price = info.get("regularMarketPrice")
         if price is None and hist is not None and not hist.empty:
@@ -165,7 +165,6 @@ def fetch_info(symbol: str):
             rel_volume = float(volume) / float(avg_volume) if avg_volume else 0.0
         except Exception:
             rel_volume = 0.0
-
         try:
             percent_gain = ((float(price) - float(prev_close)) / float(prev_close)) * 100 if prev_close else 0.0
         except Exception:
@@ -180,6 +179,7 @@ def fetch_info(symbol: str):
             "Float": int(float_shares) if float_shares is not None else None,
             "% Gain": float(percent_gain),
         }
+
     except Exception as e:
         SKIPPED_SYMBOLS_LOG.append((symbol, f"Exception fetching: {e}"))
         return None
@@ -221,8 +221,7 @@ def scan_symbols(symbols,
 
             completed += 1
             progress_bar.progress(completed / total)
-            status_placeholder.text(f"Scanned {completed}/{total} — latest: {symbol}")
-
+            status_placeholder.text(f"Scanning {completed}/{total} — latest: {symbol}")
             time.sleep(RATE_LIMIT_DELAY)
 
             if info is None:
@@ -252,88 +251,92 @@ def scan_symbols(symbols,
             if pass_filters:
                 results.append(info)
 
+    progress_bar.empty()
+    status_placeholder.empty()
+
     if results:
-        df = pd.DataFrame(results).sort_values(by="% Gain", ascending=False)
-        if top_n and top_n > 0:
+        df = pd.DataFrame(results)
+        df = df.sort_values(by="% Gain", ascending=False)
+        if top_n:
             df = df.head(top_n)
-        progress_bar.empty()
-        status_placeholder.empty()
         return df.to_dict(orient="records")
-    else:
-        progress_bar.empty()
-        status_placeholder.empty()
-        return []
+    return []
 
 # ----------------------------
 # Streamlit App UI
 # ----------------------------
 def app():
     global MAX_WORKERS, RATE_LIMIT_DELAY
-    
+
     st.set_page_config(page_title="Top Daily Stocks Scanner", layout="wide")
     st.title("📈 Top Daily Stocks Scanner")
 
     with st.sidebar:
         st.header("Universe")
         symbol_source = st.radio("Symbols source", ["S&P500"] + EXCHANGES + ["Upload File"])
-
         if symbol_source == "Upload File":
             uploaded_file = st.file_uploader("Upload CSV (must contain Symbol or Ticker column)", type=["csv"])
-            symbol_list = load_symbols_from_file(uploaded_file) if uploaded_file else []
+            if uploaded_file:
+                symbol_list = load_symbols_from_file(uploaded_file)
+            else:
+                symbol_list = []
         else:
             symbol_list = get_index_symbols(symbol_source)
 
         st.markdown("---")
-        st.header("Demand (turn ON/OFF each)")
-
+        st.header("Demand Filters")
         enable_price = st.checkbox("Enable price range filter", value=True)
         price_range = st.slider("Price range ($)", 0.01, 100.0, value=DEFAULT_PRICE_RANGE, step=0.01)
-
         enable_rel_vol = st.checkbox("Enable relative volume filter", value=True)
         rel_volume_range = st.slider("Relative Volume (x)", 1.0, 50.0, value=DEFAULT_REL_VOLUME, step=0.1)
-
         enable_pct_gain = st.checkbox("Enable % gain filter", value=True)
         percent_gain_range = st.slider("% Gain Today", -50.0, 200.0, value=DEFAULT_PERCENT_GAIN, step=0.1)
-
-        enable_news = st.checkbox("Enable news filter (requires internet scrape)", value=False)
-        news_required = st.checkbox("Require news event (when enabled)", value=False) if enable_news else False
-
-        st.markdown("---")
-        st.header("Supply")
-        enable_float = st.checkbox("Enable float (supply) filter", value=True)
-        float_limit = st.number_input("Max float (shares)", min_value=1_000, max_value=500_000_000,
-                                      value=int(DEFAULT_FLOAT_LIMIT), step=100_000)
+        enable_news = st.checkbox("Enable news filter", value=False)
+        news_required = st.checkbox("Require news event", value=False) if enable_news else False
 
         st.markdown("---")
-        st.header("Other")
+        st.header("Supply Filters")
+        enable_float = st.checkbox("Enable float filter", value=True)
+        float_limit = st.number_input("Max float (shares)", min_value=1_000, max_value=500_000_000, value=int(DEFAULT_FLOAT_LIMIT), step=100_000)
+
+        st.markdown("---")
+        st.header("Other Settings")
         top_n = st.slider("Top N results", 1, 50, 10)
         MAX_WORKERS = st.slider("Max Workers", 1, 50, MAX_WORKERS)
-        RATE_LIMIT_DELAY = st.number_input("Rate Limit Delay (seconds)", 0.0, 2.0, RATE_LIMIT_DELAY)
+        RATE_LIMIT_DELAY = st.number_input("Delay between symbols (s)", 0.0, 2.0, RATE_LIMIT_DELAY)
 
-    st.markdown("---")
-    st.write(f"Loaded {len(symbol_list)} symbols from `{symbol_source}`")
-
-    # --- New: Download Symbols CSV in parallel ---
+    # --- Pre-scan CSV creation with progress ---
     if symbol_list:
-        with st.spinner("Fetching symbol details for CSV..."):
-            with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                results = list(executor.map(fetch_basic_info, symbol_list))
-            results = [r for r in results if r]
-            if results:
-                symbols_df = pd.DataFrame(results)
-                csv_buffer = BytesIO()
-                symbols_df.to_csv(csv_buffer, index=False)
-                st.download_button(
-                    label="📥 Download Symbols List as CSV",
-                    data=csv_buffer.getvalue(),
-                    file_name=f"{symbol_source}_symbols.csv",
-                    mime="text/csv"
-                )
+        st.subheader("Preparing symbol details list…")
+        progress = st.progress(0.0)
+        status = st.empty()
+        details = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            future_to_symbol = {executor.submit(fetch_basic_info, s): s for s in symbol_list}
+            completed = 0
+            for fut in concurrent.futures.as_completed(future_to_symbol):
+                sym = future_to_symbol[fut]
+                try:
+                    data = fut.result()
+                    if data:
+                        details.append(data)
+                except Exception:
+                    pass
+                completed += 1
+                progress.progress(completed / len(symbol_list))
+                status.text(f"Fetched {completed}/{len(symbol_list)} — latest: {sym}")
+        progress.empty()
+        status.empty()
+
+        if details:
+            df_symbols = pd.DataFrame(details)
+            csv_bytes = df_symbols.to_csv(index=False).encode("utf-8")
+            st.download_button("📥 Download Symbols List CSV", csv_bytes, file_name=f"{symbol_source}_symbols.csv", mime="text/csv")
 
     run_scan = st.button("🚀 Run Scanner", disabled=(len(symbol_list) == 0))
     if run_scan:
         SKIPPED_SYMBOLS_LOG.clear()
-        with st.spinner("Scanning symbols — this may take a while for large universes..."):
+        with st.spinner("Scanning symbols…"):
             results = scan_symbols(
                 symbol_list,
                 price_range,
@@ -348,6 +351,7 @@ def app():
                 enable_float,
                 top_n
             )
+
         if results:
             df = pd.DataFrame(results)
             display_df = df.copy()
@@ -364,7 +368,7 @@ def app():
 
         if SKIPPED_SYMBOLS_LOG:
             st.markdown("---")
-            st.subheader("⚠️ Skipped / Problematic Symbols")
+            st.subheader("⚠️ Skipped Symbols")
             skipped_df = pd.DataFrame(SKIPPED_SYMBOLS_LOG, columns=["Symbol", "Reason"])
             st.dataframe(skipped_df)
             log_csv = skipped_df.to_csv(index=False).encode("utf-8")
