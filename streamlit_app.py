@@ -4,13 +4,12 @@ import pandas as pd
 import yfinance as yf
 import concurrent.futures
 import time
-from datetime import datetime
 from dotenv import load_dotenv
 import requests
 from bs4 import BeautifulSoup
 from io import BytesIO
 
-# Load .env if present
+# load .env if present
 load_dotenv()
 
 # ----------------------------
@@ -27,6 +26,7 @@ EOD_API_KEY = os.getenv("EOD_API_KEY", "")
 
 EXCHANGES = ["NASDAQ", "NYSE", "AMEX"]
 
+# Store skipped symbols and reasons
 SKIPPED_SYMBOLS_LOG = []
 
 # ----------------------------
@@ -34,7 +34,7 @@ SKIPPED_SYMBOLS_LOG = []
 # ----------------------------
 @st.cache_data(show_spinner=False)
 def get_index_symbols(source: str):
-    """Load symbols for NASDAQ/NYSE/AMEX using EOD API, S&P500 from Wikipedia."""
+    """Load symbols for NASDAQ/NYSE/AMEX from EOD API, S&P500 from Wikipedia."""
     try:
         if source in ("NASDAQ", "NYSE", "AMEX"):
             if not EOD_API_KEY:
@@ -74,7 +74,7 @@ def load_symbols_from_file(uploaded_file):
         return []
 
 # ----------------------------
-# Data fetchers and helpers
+# Data fetchers
 # ----------------------------
 def fetch_basic_info(symbol):
     try:
@@ -143,62 +143,60 @@ def fetch_info(symbol: str):
 
         volume = info.get("volume")
         avg_volume = info.get("averageVolume")
-
         if (volume is None or avg_volume is None) and hist is not None:
             try:
                 intraday = ticker.history(period="1d", interval="1m")
                 if not intraday.empty:
-                    volume = int(intraday["Volume"].iloc[-1]) if volume is None else volume
-                    avg_volume = int(intraday["Volume"].mean()) if avg_volume is None else avg_volume
+                    volume = volume or int(intraday["Volume"].iloc[-1])
+                    avg_volume = avg_volume or int(intraday["Volume"].mean())
             except Exception:
                 pass
 
         if price is None or prev_close is None or volume is None or avg_volume is None:
-            SKIPPED_SYMBOLS_LOG.append((symbol, "Missing price/volume data from yfinance"))
+            SKIPPED_SYMBOLS_LOG.append((symbol, "Missing price/volume data"))
             return None
 
-        float_shares = info.get("floatShares")
-        if float_shares is None:
-            float_shares = fetch_float_from_eod(symbol)
+        float_shares = info.get("floatShares") or fetch_float_from_eod(symbol)
 
-        try:
-            rel_volume = float(volume) / float(avg_volume) if avg_volume else 0.0
-        except Exception:
-            rel_volume = 0.0
-        try:
-            percent_gain = ((float(price) - float(prev_close)) / float(prev_close)) * 100 if prev_close else 0.0
-        except Exception:
-            percent_gain = 0.0
+        rel_volume = (float(volume) / float(avg_volume)) if avg_volume else 0.0
+        percent_gain = ((float(price) - float(prev_close)) / float(prev_close) * 100) if prev_close else 0.0
 
         return {
             "Symbol": symbol,
             "Price": float(price),
             "Volume": int(volume),
-            "Avg Volume": int(avg_volume) if avg_volume is not None else None,
-            "Rel Volume": float(rel_volume),
+            "Avg Volume": int(avg_volume),
+            "Rel Volume": rel_volume,
             "Float": int(float_shares) if float_shares is not None else None,
-            "% Gain": float(percent_gain),
+            "% Gain": percent_gain,
         }
-
     except Exception as e:
-        SKIPPED_SYMBOLS_LOG.append((symbol, f"Exception fetching: {e}"))
+        SKIPPED_SYMBOLS_LOG.append((symbol, f"Exception: {e}"))
         return None
+
+# ----------------------------
+# Cached symbol detail loader
+# ----------------------------
+@st.cache_data(show_spinner=False)
+def load_symbol_details(symbol_source, uploaded_file=None):
+    if symbol_source == "Upload File" and uploaded_file:
+        symbols = load_symbols_from_file(uploaded_file)
+    else:
+        symbols = get_index_symbols(symbol_source)
+
+    details = []
+    for sym in symbols:
+        info = fetch_basic_info(sym)
+        if info:
+            details.append(info)
+    return pd.DataFrame(details)
 
 # ----------------------------
 # Scanner
 # ----------------------------
-def scan_symbols(symbols,
-                 price_range,
-                 rel_volume_range,
-                 percent_gain_range,
-                 news_required,
-                 float_limit,
-                 enable_price,
-                 enable_rel_vol,
-                 enable_pct_gain,
-                 enable_news,
-                 enable_float,
-                 top_n):
+def scan_symbols(symbols, price_range, rel_volume_range, percent_gain_range,
+                 news_required, float_limit, enable_price, enable_rel_vol,
+                 enable_pct_gain, enable_news, enable_float, top_n):
     results = []
     total = len(symbols)
     if total == 0:
@@ -216,19 +214,19 @@ def scan_symbols(symbols,
             try:
                 info = fut.result()
             except Exception as e:
-                SKIPPED_SYMBOLS_LOG.append((symbol, f"Worker exception: {e}"))
+                SKIPPED_SYMBOLS_LOG.append((symbol, f"Error: {e}"))
                 info = None
 
             completed += 1
             progress_bar.progress(completed / total)
-            status_placeholder.text(f"Scanning {completed}/{total} — latest: {symbol}")
+            status_placeholder.text(f"Scanned {completed}/{total} — latest: {symbol}")
             time.sleep(RATE_LIMIT_DELAY)
 
-            if info is None:
+            if not info:
                 continue
 
             if enable_float and (info.get("Float") is None):
-                SKIPPED_SYMBOLS_LOG.append((symbol, "Missing float data"))
+                SKIPPED_SYMBOLS_LOG.append((symbol, "Missing float"))
                 continue
 
             price = info.get("Price")
@@ -255,15 +253,14 @@ def scan_symbols(symbols,
     status_placeholder.empty()
 
     if results:
-        df = pd.DataFrame(results)
-        df = df.sort_values(by="% Gain", ascending=False)
+        df = pd.DataFrame(results).sort_values(by="% Gain", ascending=False)
         if top_n:
             df = df.head(top_n)
         return df.to_dict(orient="records")
     return []
 
 # ----------------------------
-# Streamlit App UI
+# App UI
 # ----------------------------
 def app():
     global MAX_WORKERS, RATE_LIMIT_DELAY
@@ -274,105 +271,77 @@ def app():
     with st.sidebar:
         st.header("Universe")
         symbol_source = st.radio("Symbols source", ["S&P500"] + EXCHANGES + ["Upload File"])
+        uploaded_file = None
         if symbol_source == "Upload File":
-            uploaded_file = st.file_uploader("Upload CSV (must contain Symbol or Ticker column)", type=["csv"])
-            if uploaded_file:
-                symbol_list = load_symbols_from_file(uploaded_file)
-            else:
-                symbol_list = []
-        else:
-            symbol_list = get_index_symbols(symbol_source)
+            uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
 
         st.markdown("---")
         st.header("Demand Filters")
-        enable_price = st.checkbox("Enable price range filter", value=True)
-        price_range = st.slider("Price range ($)", 0.01, 100.0, value=DEFAULT_PRICE_RANGE, step=0.01)
+        enable_price = st.checkbox("Enable price filter", value=True)
+        price_range = st.slider("Price range ($)", 0.01, 100.0, DEFAULT_PRICE_RANGE, 0.01)
+
         enable_rel_vol = st.checkbox("Enable relative volume filter", value=True)
-        rel_volume_range = st.slider("Relative Volume (x)", 1.0, 50.0, value=DEFAULT_REL_VOLUME, step=0.1)
+        rel_volume_range = st.slider("Relative Volume (x)", 1.0, 50.0, DEFAULT_REL_VOLUME, 0.1)
+
         enable_pct_gain = st.checkbox("Enable % gain filter", value=True)
-        percent_gain_range = st.slider("% Gain Today", -50.0, 200.0, value=DEFAULT_PERCENT_GAIN, step=0.1)
+        percent_gain_range = st.slider("% Gain Today", -50.0, 200.0, DEFAULT_PERCENT_GAIN, 0.1)
+
         enable_news = st.checkbox("Enable news filter", value=False)
         news_required = st.checkbox("Require news event", value=False) if enable_news else False
 
         st.markdown("---")
-        st.header("Supply Filters")
+        st.header("Supply Filter")
         enable_float = st.checkbox("Enable float filter", value=True)
-        float_limit = st.number_input("Max float (shares)", min_value=1_000, max_value=500_000_000, value=int(DEFAULT_FLOAT_LIMIT), step=100_000)
+        float_limit = st.number_input("Max float", 1_000, 500_000_000, DEFAULT_FLOAT_LIMIT, 100_000)
 
         st.markdown("---")
-        st.header("Other Settings")
+        st.header("Other")
         top_n = st.slider("Top N results", 1, 50, 10)
         MAX_WORKERS = st.slider("Max Workers", 1, 50, MAX_WORKERS)
-        RATE_LIMIT_DELAY = st.number_input("Delay between symbols (s)", 0.0, 2.0, RATE_LIMIT_DELAY)
+        RATE_LIMIT_DELAY = st.number_input("Rate Limit Delay (s)", 0.0, 2.0, RATE_LIMIT_DELAY)
 
-    # --- Pre-scan CSV creation with progress ---
-    if symbol_list:
-        st.subheader("Preparing symbol details list…")
-        progress = st.progress(0.0)
-        status = st.empty()
-        details = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            future_to_symbol = {executor.submit(fetch_basic_info, s): s for s in symbol_list}
-            completed = 0
-            for fut in concurrent.futures.as_completed(future_to_symbol):
-                sym = future_to_symbol[fut]
-                try:
-                    data = fut.result()
-                    if data:
-                        details.append(data)
-                except Exception:
-                    pass
-                completed += 1
-                progress.progress(completed / len(symbol_list))
-                status.text(f"Fetched {completed}/{len(symbol_list)} — latest: {sym}")
-        progress.empty()
-        status.empty()
+    # Load and show symbol details
+    symbols_df = load_symbol_details(symbol_source, uploaded_file)
+    st.write(f"Loaded {len(symbols_df)} symbols from `{symbol_source}`")
 
-        if details:
-            df_symbols = pd.DataFrame(details)
-            csv_bytes = df_symbols.to_csv(index=False).encode("utf-8")
-            st.download_button("📥 Download Symbols List CSV", csv_bytes, file_name=f"{symbol_source}_symbols.csv", mime="text/csv")
+    if not symbols_df.empty:
+        csv_buffer = BytesIO()
+        symbols_df.to_csv(csv_buffer, index=False)
+        st.download_button(
+            label="📥 Download Symbols List CSV",
+            data=csv_buffer.getvalue(),
+            file_name=f"{symbol_source}_symbols.csv",
+            mime="text/csv"
+        )
 
-    run_scan = st.button("🚀 Run Scanner", disabled=(len(symbol_list) == 0))
+    # Run scanner
+    run_scan = st.button("🚀 Run Scanner", disabled=symbols_df.empty)
     if run_scan:
         SKIPPED_SYMBOLS_LOG.clear()
-        with st.spinner("Scanning symbols…"):
-            results = scan_symbols(
-                symbol_list,
-                price_range,
-                rel_volume_range,
-                percent_gain_range,
-                news_required,
-                float_limit,
-                enable_price,
-                enable_rel_vol,
-                enable_pct_gain,
-                enable_news,
-                enable_float,
-                top_n
-            )
+        symbols = symbols_df["Symbol"].tolist()
+        with st.spinner("Scanning..."):
+            results = scan_symbols(symbols, price_range, rel_volume_range, percent_gain_range,
+                                   news_required, float_limit, enable_price, enable_rel_vol,
+                                   enable_pct_gain, enable_news, enable_float, top_n)
 
         if results:
             df = pd.DataFrame(results)
             display_df = df.copy()
-            if "Volume" in display_df.columns:
+            if "Volume" in display_df:
                 display_df["Volume"] = display_df["Volume"].apply(lambda x: f"{int(x):,}")
-            if "Float" in display_df.columns:
+            if "Float" in display_df:
                 display_df["Float"] = display_df["Float"].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "")
-            st.success(f"✅ Found {len(display_df)} matching stocks")
+            st.success(f"✅ Found {len(display_df)} matches")
             st.dataframe(display_df, use_container_width=True)
-            csv_bytes = df.to_csv(index=False).encode("utf-8")
-            st.download_button("📥 Download Results CSV", csv_bytes, file_name="scan_results.csv", mime="text/csv")
+            st.download_button("📥 Download Results CSV", df.to_csv(index=False).encode(), "scan_results.csv", "text/csv")
         else:
-            st.warning("No symbols matched the enabled criteria.")
+            st.warning("No matches found.")
 
         if SKIPPED_SYMBOLS_LOG:
-            st.markdown("---")
-            st.subheader("⚠️ Skipped Symbols")
             skipped_df = pd.DataFrame(SKIPPED_SYMBOLS_LOG, columns=["Symbol", "Reason"])
+            st.subheader("⚠️ Skipped Symbols")
             st.dataframe(skipped_df)
-            log_csv = skipped_df.to_csv(index=False).encode("utf-8")
-            st.download_button("📥 Download Skipped Log", log_csv, file_name="skipped_log.csv", mime="text/csv")
+            st.download_button("📥 Download Skipped Log", skipped_df.to_csv(index=False).encode(), "skipped_log.csv", "text/csv")
 
 if __name__ == "__main__":
     app()
